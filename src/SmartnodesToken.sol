@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
 
 /**
  * @title SmartnodesToken
@@ -10,15 +11,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  */
 contract SmartnodesToken is ERC20, ReentrancyGuard {
     // Custom Errors
-    error SmartnodesCore__ZeroAddress();
+    error SmartnodesToken__ZeroAddress();
     error SmartnodesToken__InvalidCaller();
+    error SmartnodesToken__InvalidPayment();
+    error SmartnodesToken__InsufficientBalance();
+    error SmartnodesToken__InvalidLockAmount();
     error SmartnodesToken__InvalidWorkerData();
-    error SmartnodesCore__InvalidPayment();
+    error SmartnodesToken__ValidatorAlreadyLocked();
 
     struct ValidatorLock {
         uint256 tokensLocked; // Amount of tokens locked by the validator
         uint256 unlockTime; // Timestamp when the tokens can be unlocked
-        bool exists; // Whether the validator lock exists
     }
 
     // Constants
@@ -26,43 +29,51 @@ contract SmartnodesToken is ERC20, ReentrancyGuard {
     uint256 private constant INITIAL_EMISSION_RATE = 5832e18;
     uint256 private constant TAIL_EMISSION = 512e18;
     uint256 private constant TRISECTION_PERIOD = 365 days; // 1 year in seconds
+    uint256 private constant UNLOCK_PERIOD = 14 days;
     uint256 private immutable i_DEPLOY_TIME;
     uint96 private immutable i_lockAmount = 250_000e18;
 
+    ISmartnodesCore private immutable i_smartnodesCore;
+
     // State Variables
-    address private s_smartnodesCore;
     mapping(address user => uint256 unclaimedRewards)
         private s_unclaimedRewards;
-    mapping(address => ValidatorLock) private s_validatorLocks;
+    mapping(address => uint256) private s_escrowedPayments;
+
+    uint256 private s_totalLocked;
+    uint256 private s_totalUnclaimed;
 
     // Modifiers
     modifier onlyCore() {
         // Check if the caller is the SmartnodesCore contract
-        if (msg.sender != s_smartnodesCore)
+        if (msg.sender != address(i_smartnodesCore))
             revert SmartnodesToken__InvalidCaller();
         _;
     }
 
     // Events
-    event SmartnodesToken__PaymentEscrowed(
-        address user,
-        uint256 payment,
-        uint8 networkId
-    );
+    event PaymentEscrowed(address user, uint256 payment, uint8 networkId);
+
+    event EscrowReleased(address user, uint256 amount);
 
     constructor(
         address[] memory _genesisNodes,
         address _smartnodesCore
     ) ERC20("Smartnodes", "SNO") {
-        s_smartnodesCore = _smartnodesCore;
+        i_smartnodesCore = ISmartnodesCore(_smartnodesCore);
         i_DEPLOY_TIME = block.timestamp;
 
         // Mint initial tokens to genesis nodes
-        for (uint256 i = 0; i < _genesisNodes.length; ) {
+        uint256 genesisLength = _genesisNodes.length;
+        for (uint256 i = 0; i < genesisLength; ) {
             address validator = _genesisNodes[i];
-            _mint(validator, i_lockAmount);
-            unchecked {
-                ++i;
+
+            if (validator != address(0)) {
+                _mint(validator, i_lockAmount);
+                s_totalLocked += i_lockAmount;
+                unchecked {
+                    ++i;
+                }
             }
         }
     }
@@ -76,38 +87,76 @@ contract SmartnodesToken is ERC20, ReentrancyGuard {
      * @param _amount The amount of tokens to escrow
      * @param _networkId The ID of the network for which the payment is made
      */
-    function escrowPaywment(
+    function escrowPayment(
         address _user,
         uint256 _amount,
         uint8 _networkId
     ) external onlyCore nonReentrant {
-        if (_user == address(0)) {
-            revert SmartnodesCore__ZeroAddress();
-        }
-        if (_amount == 0) {
-            revert SmartnodesCore__InvalidPayment();
-        }
+        if (_user == address(0)) revert SmartnodesToken__ZeroAddress();
+        if (_amount == 0) revert SmartnodesToken__InvalidPayment();
+        if (balanceOf(_user) < _amount)
+            revert SmartnodesToken__InsufficientBalance();
 
         // Transfer tokens from the caller to the worker
-        _transfer(msg.sender, _user, _amount);
+        _transfer(_user, address(this), _amount);
+
+        s_escrowedPayments[_user] += _amount;
 
         // Emit event for payment escrowed
-        emit SmartnodesToken__PaymentEscrowed(_user, _amount, _networkId);
+        emit PaymentEscrowed(_user, _amount, _networkId);
     }
 
+    /**
+     * @notice Release escrowed payment back to user when job is cancelled
+     * @param _user The address of the user to receive the refund
+     * @param _amount The amount of tokens to release
+     */
     function releaseEscrow(
         address _user,
         uint256 _amount
     ) external onlyCore nonReentrant {
-        if (_user == address(0)) {
-            revert SmartnodesCore__ZeroAddress();
-        }
-        if (_amount == 0) {
-            revert SmartnodesCore__InvalidPayment();
-        }
+        if (_user == address(0)) revert SmartnodesToken__ZeroAddress();
+        if (_amount == 0) revert SmartnodesToken__InvalidPayment();
+        if (s_escrowedPayments[_user] < _amount)
+            revert SmartnodesToken__InsufficientBalance();
 
         // Transfer tokens from the contract to the user
+        s_escrowedPayments[_user] -= _amount;
         _transfer(address(this), _user, _amount);
+
+        emit EscrowReleased(_user, _amount);
+    }
+
+    // ============ Validator Locking ============
+
+    /**
+     * @notice Lock tokens for a validator
+     * @dev Only callable by the SmartnodesCore contract
+     * @param _validator The address of the validator locking tokens
+     */
+    function createValidatorLock(
+        address _validator
+    ) external onlyCore nonReentrant {
+        if (_validator == address(0)) revert SmartnodesToken__ZeroAddress();
+        if (i_lockAmount == 0) revert SmartnodesToken__InvalidLockAmount();
+        if (balanceOf(_validator) < i_lockAmount)
+            revert SmartnodesToken__InsufficientBalance();
+
+        // Transfer tokens to the contract for locking
+        _transfer(_validator, address(this), i_lockAmount);
+    }
+
+    /**
+     * @notice Unlock tokens for a validator after the unlock period
+     * @dev Only callable by the SmartnodesCore contract
+     * @param _validator The address of the validator unlocking tokens
+     */
+    function unlockValidatorTokens(
+        address _validator
+    ) external onlyCore nonReentrant {
+        if (_validator == address(0)) revert SmartnodesToken__ZeroAddress();
+        s_totalLocked -= i_lockAmount;
+        _transfer(address(this), _validator, i_lockAmount);
     }
 
     // ============ Emissions & Halving ============
@@ -125,12 +174,17 @@ contract SmartnodesToken is ERC20, ReentrancyGuard {
         if (_workerCapacities.length != _workers.length) {
             revert SmartnodesToken__InvalidWorkerData();
         }
+        uint256 workersLength = _workers.length;
+        uint256 validatorsLength = _validatorsVoted.length;
+        uint256 capacitiesLength = _workerCapacities.length;
+
         uint256 currentEmission = getEmissionRate();
         uint256 totalReward = currentEmission + additionalReward;
 
         uint256 validatorReward;
         uint256 workerReward;
-        if (_workers.length == 0) {
+
+        if (workersLength == 0) {
             validatorReward = totalReward;
         } else {
             workerReward =
@@ -139,19 +193,12 @@ contract SmartnodesToken is ERC20, ReentrancyGuard {
             validatorReward = totalReward - workerReward;
         }
 
-        // Sum total worker capacity
-        uint256 totalWorkerCapacity;
-        for (uint256 i = 0; i < _workerCapacities.length; ) {
-            totalWorkerCapacity += _workerCapacities[i];
-            unchecked {
-                ++i;
-            }
-        }
+        s_totalUnclaimed += totalReward;
 
         // Distribute validator rewards equally
-        if (_validatorsVoted.length > 0) {
+        if (validatorsLength > 0) {
             uint256 validatorShare = validatorReward / _validatorsVoted.length;
-            for (uint256 i = 0; i < _validatorsVoted.length; ) {
+            for (uint256 i = 0; i < validatorsLength; ) {
                 s_unclaimedRewards[_validatorsVoted[i]] += validatorShare;
                 unchecked {
                     ++i;
@@ -159,15 +206,27 @@ contract SmartnodesToken is ERC20, ReentrancyGuard {
             }
         }
 
-        // Distribute worker rewards proportional to their capacities
-        if (totalWorkerCapacity > 0) {
-            for (uint256 i = 0; i < _workers.length; ) {
-                uint256 capacity = _workerCapacities[i];
-                s_unclaimedRewards[_workers[i]] +=
-                    (workerReward * capacity) /
-                    totalWorkerCapacity;
+        // Sum total worker capacity
+        if (workersLength > 0) {
+            uint256 totalWorkerCapacity;
+
+            for (uint256 i = 0; i < capacitiesLength; ) {
+                totalWorkerCapacity += _workerCapacities[i];
                 unchecked {
                     ++i;
+                }
+            }
+
+            // Distribute worker rewards proportional to their capacities
+            if (totalWorkerCapacity > 0) {
+                for (uint256 i = 0; i < workersLength; ) {
+                    uint256 capacity = _workerCapacities[i];
+                    s_unclaimedRewards[_workers[i]] +=
+                        (workerReward * capacity) /
+                        totalWorkerCapacity;
+                    unchecked {
+                        ++i;
+                    }
                 }
             }
         }

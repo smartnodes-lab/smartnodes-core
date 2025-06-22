@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+/**
+ * @title ISmartnodesToken
+ * @dev Interface for SmartnodesToken contract
+ */
 interface ISmartnodesToken {
-    // ========== Errors ==========
-    error SmartnodesToken__InvalidCaller();
-    error SmartnodesToken__InvalidWorkerData();
+    function escrowPayment(
+        address _user,
+        uint256 _amount,
+        uint8 _networkId
+    ) external;
 
-    // ========== External Functions ==========
+    function releaseEscrow(address _user, uint256 _amount) external;
 
-    /**
-     * @notice Distribute rewards to workers and validators
-     * @dev Callable only by SmartnodesCore
-     */
     function mintRewards(
         address[] calldata _workers,
         address[] calldata _validatorsVoted,
@@ -19,20 +21,15 @@ interface ISmartnodesToken {
         uint256 additionalReward
     ) external;
 
-    /**
-     * @notice Claim any accumulated unclaimed rewards
-     */
-    function claimRewards() external;
+    function createValidatorLock(address _validator) external;
 
-    /**
-     * @notice Called to update the emission rate based on the era
-     * @dev Callable only by SmartnodesCore
-     */
-    function updateEmissionRate() external;
+    function unlockValidatorTokens(address _validator) external;
 
-    /**
-     * @notice Get the current emission rate based on the emission schedule
-     * @return emissionRate Current emission rate
-     */
-    function getEmissionRate() external view returns (uint256 emissionRate);
+    function addNetwork(string calldata name) external;
+
+    function getUnclaimedRewards(address user) external view returns (uint256);
+
+    function isValidatorStaked(address validator) external view returns (bool);
+
+    function getLockAmount() external view returns (uint256);
 }
