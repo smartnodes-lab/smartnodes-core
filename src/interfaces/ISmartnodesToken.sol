@@ -6,13 +6,15 @@ pragma solidity ^0.8.20;
  * @dev Interface for SmartnodesToken contract
  */
 interface ISmartnodesToken {
-    function escrowPayment(
-        address _user,
-        uint256 _amount,
-        uint8 _networkId
-    ) external;
+    function lockTokens(address _validator) external;
 
-    function releaseEscrow(address _user, uint256 _amount) external;
+    function unlockTokens(address _validator) external;
+
+    function addNetwork(string calldata name) external;
+
+    function getUnclaimedRewards(address user) external view returns (uint256);
+
+    function getLockAmount() external view returns (uint256);
 
     function mintRewards(
         address[] calldata _workers,
@@ -21,15 +23,9 @@ interface ISmartnodesToken {
         uint256 additionalReward
     ) external;
 
-    function createValidatorLock(address _validator) external;
-
-    function unlockValidatorTokens(address _validator) external;
-
-    function addNetwork(string calldata name) external;
-
-    function getUnclaimedRewards(address user) external view returns (uint256);
-
-    function isValidatorStaked(address validator) external view returns (bool);
-
-    function getLockAmount() external view returns (uint256);
+    function escrowPayment(
+        address _user,
+        uint256 _payment,
+        uint8 _networkId
+    ) external returns (uint256);
 }
