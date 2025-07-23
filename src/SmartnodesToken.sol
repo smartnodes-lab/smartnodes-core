@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
 
 // import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
@@ -15,7 +16,7 @@ import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
  * @dev Features reward assignment during SmartnodesCore state updates, which can be claimed by workers and validators.
  * @dev Provides a locking mechanism for validators on SmartnodesCore, and a yearly reward reduction mechanism.
  */
-contract SmartnodesToken is ERC20 {
+contract SmartnodesToken is ERC20, Ownable {
     /** Errors */
     error SmartnodesToken__InsufficientBalance();
     error SmartnodesToken__InvalidAddress();
@@ -23,6 +24,13 @@ contract SmartnodesToken is ERC20 {
     error SmartnodesToken__NotLocked();
     error SmartnodesToken__UnlockPending();
     error SmartnodesToken__TransferFailed();
+    error SmartnodesToken__CoreNotSet();
+    error SmartnodesToken__CoreAlreadySet();
+
+    enum UserType {
+        USER,
+        VALIDATOR
+    }
 
     struct LockedTokens {
         bool locked;
@@ -37,10 +45,11 @@ contract SmartnodesToken is ERC20 {
     uint256 private constant REWARD_PERIOD = 365 days; // 1 year in seconds
     uint256 private constant UNLOCK_PERIOD = 14 days;
     uint256 private immutable i_deploymentTimestamp;
-    ISmartnodesCore private immutable i_smartnodesCore;
 
     /** State Variables */
-    uint256 public s_lockAmount = 500_000e18;
+    ISmartnodesCore public s_smartnodesCore; // Mutable reference instead of immutable
+    bool public s_coreSet; // Flag to ensure core can only be set once
+    uint256 public s_validatorLockAmount = 500_000e18;
     uint256 public s_userLockAmount = 500e18;
     uint256 public s_daoTokenFunds;
     uint256 public s_daoEthFunds;
@@ -55,7 +64,10 @@ contract SmartnodesToken is ERC20 {
     mapping(address => uint256) private s_escrowedEthPayments;
 
     modifier onlySmartnodesCore() {
-        if (msg.sender != address(i_smartnodesCore)) {
+        if (address(s_smartnodesCore) == address(0)) {
+            revert SmartnodesToken__CoreNotSet();
+        }
+        if (msg.sender != address(s_smartnodesCore)) {
             revert SmartnodesToken__InvalidAddress();
         }
         _;
@@ -73,58 +85,91 @@ contract SmartnodesToken is ERC20 {
     );
     event EscrowReleased(address indexed user, uint256 amount);
     event EthEscrowReleased(address indexed user, uint256 amount);
-    event TokensLocked(address indexed validator, uint256 amount);
-    event TokensUnlocked(address indexed validator, uint256 amount);
-    event UnlockInitiated(address indexed validator, uint256 unlockTime);
+    event TokensLocked(address indexed user, uint8 userType, uint256 amount);
+    event TokensUnlocked(address indexed user, uint8 userType, uint256 amount);
+    event UnlockInitiated(address indexed user, uint256 unlockTime);
     event EthRewardsClaimed(address indexed user, uint256 amount);
     event TokenRewardsClaimed(address indexed user, uint256 amount);
+    event CoreContractSet(address indexed coreContract);
 
     constructor(
-        address[] memory _genesisNodes,
-        address _smartnodesCore
-    ) ERC20("SmartnodesToken", "SNO") {
-        i_smartnodesCore = ISmartnodesCore(_smartnodesCore);
+        address[] memory _genesisNodes
+    ) ERC20("SmartnodesToken", "SNO") Ownable(msg.sender) {
         i_deploymentTimestamp = block.timestamp;
+        s_coreSet = false;
 
         // Mint initial tokens to genesis nodes
         uint256 gensisNodesLength = _genesisNodes.length;
         for (uint256 i = 0; i < gensisNodesLength; i++) {
-            _mint(_genesisNodes[i], s_lockAmount);
+            _mint(_genesisNodes[i], s_validatorLockAmount);
         }
+    }
+
+    /**
+     * @dev Sets the SmartnodesCore contract address. Can only be called once by owner.
+     * @param _smartnodesCore Address of the deployed SmartnodesCore contract
+     */
+    function setSmartnodesCore(address _smartnodesCore) external onlyOwner {
+        if (s_coreSet) {
+            revert SmartnodesToken__CoreAlreadySet();
+        }
+        if (_smartnodesCore == address(0)) {
+            revert SmartnodesToken__InvalidAddress();
+        }
+
+        s_smartnodesCore = ISmartnodesCore(_smartnodesCore);
+        s_coreSet = true;
+
+        emit CoreContractSet(_smartnodesCore);
     }
 
     // ============ Locking & Payments ============
 
     /**
-     * @notice Lock tokens for a validator
-     * @param _validator The address of the validator locking tokens
+     * @notice Lock tokens for a validator or user
+     * @param _user The address of the validator locking tokens
      */
-    function lockTokens(address _validator) external onlySmartnodesCore {
-        if (_validator == address(0)) {
+    function lockTokens(
+        address _user,
+        uint8 _userType
+    ) external onlySmartnodesCore {
+        if (_user == address(0)) {
             revert SmartnodesToken__InvalidAddress();
         }
-        if (balanceOf(_validator) < s_lockAmount) {
+
+        uint256 lockAmount;
+        if (_userType == uint8(UserType.USER)) {
+            lockAmount = s_userLockAmount;
+        } else if (_userType == uint8(UserType.VALIDATOR)) {
+            lockAmount = s_validatorLockAmount;
+        }
+
+        if (balanceOf(_user) < lockAmount) {
             revert SmartnodesToken__InsufficientBalance();
         }
 
-        LockedTokens storage locked = s_lockedTokens[_validator];
+        LockedTokens storage locked = s_lockedTokens[_user];
         if (locked.locked) revert SmartnodesToken__AlreadyLocked();
+
         locked.locked = true;
-        _transfer(_validator, address(this), s_lockAmount);
-        emit TokensLocked(_validator, s_lockAmount);
+        _transfer(_user, address(this), lockAmount);
+        emit TokensLocked(_user, _userType, lockAmount);
     }
 
     /**
-     * @notice Unlock tokens for a validator after the unlock period
+     * @notice Unlock tokens for a user after the unlock period
      * @dev Can be called once to initiate the unlock process, and once again for claiming tokens after the unlock period
-     * @param _validator The address of the validator unlocking tokens
+     * @param _user The address of the user unlocking tokens
      */
-    function unlockTokens(address _validator) external onlySmartnodesCore {
-        if (_validator == address(0)) {
+    function unlockTokens(
+        address _user,
+        uint8 _userType
+    ) external onlySmartnodesCore {
+        if (_user == address(0)) {
             revert SmartnodesToken__InvalidAddress();
         }
 
-        LockedTokens storage locked = s_lockedTokens[_validator];
+        LockedTokens storage locked = s_lockedTokens[_user];
         if (!locked.locked) {
             // If locked is false, the tokens are either already unlocking or were never locked
             if (locked.unlockTime == 0) {
@@ -138,14 +183,21 @@ contract SmartnodesToken is ERC20 {
             }
 
             // Finalize the unlock process
-            delete s_lockedTokens[_validator];
-            _transfer(address(this), _validator, s_lockAmount);
-            emit TokensUnlocked(_validator, s_lockAmount);
+            uint256 lockAmount;
+            if (_userType == uint8(UserType.USER)) {
+                lockAmount = s_userLockAmount;
+            } else {
+                lockAmount = s_validatorLockAmount;
+            }
+
+            delete s_lockedTokens[_user];
+            _transfer(address(this), _user, lockAmount);
+            emit TokensUnlocked(_user, _userType, lockAmount);
         } else {
             // If locked is true, initiate the unlock process
             locked.locked = false;
             locked.unlockTime = uint128(block.timestamp);
-            emit UnlockInitiated(_validator, locked.unlockTime);
+            emit UnlockInitiated(_user, locked.unlockTime);
         }
     }
 
@@ -260,94 +312,92 @@ contract SmartnodesToken is ERC20 {
         uint256 _additionalReward,
         uint256 _additionalEthReward
     ) external onlySmartnodesCore {
-        uint256 workersLength = _workers.length;
-        uint256 validatorsLength = _validators.length;
-        uint256 capacitiesLength = _capacities.length;
-
-        // Get current emission rate and calculate total rewards to mint
-        uint256 currentEmission = getEmissionRate();
-        uint256 totalTokenReward = currentEmission + _additionalReward;
+        uint256 totalTokenReward = getEmissionRate() + _additionalReward;
         uint256 totalEthReward = _additionalEthReward;
 
-        // Calculate DAO reward
+        // DAO cut
         uint256 daoTokenReward = (totalTokenReward * DAO_REWARD_PERCENTAGE) /
             100;
-        totalTokenReward -= daoTokenReward;
         uint256 daoEthReward = (totalEthReward * DAO_REWARD_PERCENTAGE) / 100;
+        totalTokenReward -= daoTokenReward;
         totalEthReward -= daoEthReward;
 
-        // Calculate split of total reward for validators and workers
-        uint256 validatorTokenReward;
-        uint256 workerTokenReward;
-        uint256 validatorEthReward;
-        uint256 workerEthReward;
-        if (workersLength == 0) {
-            validatorTokenReward = totalTokenReward;
-            validatorEthReward = totalEthReward;
-        } else {
-            workerTokenReward =
-                (totalTokenReward * (100 - VALIDATOR_REWARD_PERCENTAGE)) /
-                100;
-            validatorTokenReward = totalTokenReward - workerTokenReward;
-            workerEthReward =
-                (totalEthReward * (100 - VALIDATOR_REWARD_PERCENTAGE)) /
-                100;
-            validatorEthReward = totalEthReward - workerEthReward;
-        }
-
-        // Update state
         s_daoTokenFunds += daoTokenReward;
         s_daoEthFunds += daoEthReward;
         s_totalTokensUnclaimed += totalTokenReward;
         s_totalEthUnclaimed += totalEthReward;
 
-        // Calculate share of reward for each validator (distributed equally)
-        uint256 validatorShare = validatorTokenReward / validatorsLength;
-        uint256 validatorEthShare;
-        if (totalEthReward > 0) {
-            validatorEthShare = validatorEthReward / validatorsLength;
-        }
+        // Split validator/worker share
+        (uint256 validatorToken, uint256 workerToken) = _splitReward(
+            totalTokenReward
+        );
+        (uint256 validatorEth, uint256 workerEth) = _splitReward(
+            totalEthReward
+        );
 
-        // Distribute rewards among validators who voted
-        for (uint256 i = 0; i < validatorsLength; ) {
-            s_unclaimedRewards[_validators[i]] += validatorShare;
-            if (validatorEthShare > 0) {
-                s_unclaimedEthRewards[_validators[i]] += validatorEthShare;
-            }
+        _distributeToValidators(_validators, validatorToken, validatorEth);
+        _distributeToWorkers(_workers, _capacities, workerToken, workerEth);
+    }
+
+    function _splitReward(
+        uint256 totalReward
+    ) internal pure returns (uint256 validatorShare, uint256 workerShare) {
+        if (totalReward == 0) return (0, 0);
+        workerShare = (totalReward * (100 - VALIDATOR_REWARD_PERCENTAGE)) / 100;
+        validatorShare = totalReward - workerShare;
+    }
+
+    function _distributeToValidators(
+        address[] calldata validators,
+        uint256 tokenAmount,
+        uint256 ethAmount
+    ) internal {
+        uint256 len = validators.length;
+        if (len == 0) return;
+        uint256 tokenShare = tokenAmount / len;
+        uint256 ethShare = ethAmount > 0 ? ethAmount / len : 0;
+
+        for (uint256 i = 0; i < len; ) {
+            address v = validators[i];
+            s_unclaimedRewards[v] += tokenShare;
+            if (ethShare > 0) s_unclaimedEthRewards[v] += ethShare;
             unchecked {
                 ++i;
             }
         }
+    }
 
-        // Distribute rewards among workers proportional to their capacities
-        if (workersLength > 0) {
-            // Calculate total capacity of all workers
-            uint256 totalCapacity;
-            for (uint256 i = 0; i < capacitiesLength; ) {
-                totalCapacity += _capacities[i];
-                unchecked {
-                    ++i;
-                }
+    function _distributeToWorkers(
+        address[] calldata workers,
+        uint256[] calldata capacities,
+        uint256 tokenAmount,
+        uint256 ethAmount
+    ) internal {
+        uint256 len = workers.length;
+        if (len == 0) return;
+
+        uint256 totalCapacity;
+        for (uint256 i = 0; i < capacities.length; ) {
+            totalCapacity += capacities[i];
+            unchecked {
+                ++i;
             }
+        }
+        if (totalCapacity == 0) return;
 
-            if (totalCapacity > 0) {
-                for (uint256 i = 0; i < workersLength; ) {
-                    // Distribute token reward claims
-                    uint256 tokenShare = (workerTokenReward * _capacities[i]) /
-                        totalCapacity;
-                    s_unclaimedRewards[_workers[i]] += tokenShare;
+        for (uint256 i = 0; i < len; ) {
+            address w = workers[i];
+            uint256 cap = capacities[i];
 
-                    // Distribute ETH reward claims if applicable
-                    if (workerEthReward > 0) {
-                        uint256 ethShare = (workerEthReward * _capacities[i]) /
-                            totalCapacity;
-                        s_unclaimedEthRewards[_workers[i]] += ethShare;
-                    }
+            uint256 tokenShare = (tokenAmount * cap) / totalCapacity;
+            s_unclaimedRewards[w] += tokenShare;
 
-                    unchecked {
-                        ++i;
-                    }
-                }
+            if (ethAmount > 0) {
+                uint256 ethShare = (ethAmount * cap) / totalCapacity;
+                s_unclaimedEthRewards[w] += ethShare;
+            }
+            unchecked {
+                ++i;
             }
         }
     }
@@ -417,4 +467,11 @@ contract SmartnodesToken is ERC20 {
     }
 
     // =============== DAO Functions ===============
+
+    /**
+     * @dev Get the current SmartnodesCore contract address
+     */
+    function getSmartnodesCore() external view returns (address) {
+        return address(s_smartnodesCore);
+    }
 }

@@ -2,21 +2,61 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title ISmartnodesCore
- * @dev Interface for SmartnodesCore contract
+ * @title ISmartnodesCore Interface
+ * @dev Interface for the SmartnodesCore contract
  */
 interface ISmartnodesCore {
-    function validatorExists(
-        address validatorAddress
-    ) external view returns (bool);
+    enum JobState {
+        DoesntExist,
+        Pending,
+        Active,
+        Complete
+    }
 
-    function addNetwork(string calldata name) external;
+    enum PaymentType {
+        SNO_TOKEN,
+        ETH
+    }
 
-    function getValidatorInfo(
-        address validatorAddress
-    ) external view returns (bytes32, bool);
+    struct Job {
+        uint128 payment;
+        uint8 networkId;
+        uint8 state;
+        uint8 paymentType;
+        address owner;
+    }
 
-    function getJobInfo(
-        bytes32 jobId
-    ) external view returns (uint128, address, uint8, bool);
+    function addNetwork(string calldata _name) external;
+
+    function createValidator(bytes32 publicKeyHash) external;
+
+    function createUser(bytes32 publicKeyHash) external;
+
+    function requestJob(
+        bytes32 _userId,
+        bytes32 _jobId,
+        uint8 _networkId,
+        uint256[] calldata _capacities,
+        uint128 _payment
+    ) external payable;
+
+    function updateContract(
+        bytes32[] calldata _jobIds,
+        address[] calldata _validators,
+        address[] calldata _workers,
+        uint256[] calldata _capacities
+    ) external;
+
+    function jobs(
+        bytes32 _jobId
+    )
+        external
+        view
+        returns (
+            uint128 payment,
+            uint8 networkId,
+            uint8 state,
+            uint8 paymentType,
+            address owner
+        );
 }

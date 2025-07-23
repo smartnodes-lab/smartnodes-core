@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.22;
 
-import {ISmartnodesCoordinator} from "./interfaces/ISmartnodesCoordinator.sol";
+// import {ISmartnodesCoordinator} from "./interfaces/ISmartnodesCoordinator.sol";
 import {ISmartnodesToken} from "./interfaces/ISmartnodesToken.sol";
 
 /**
@@ -64,7 +64,7 @@ contract SmartnodesCore {
     uint24 private constant UNLOCK_PERIOD = 14 days;
     uint8 private constant MAX_NETWORKS = 16;
 
-    ISmartnodesCoordinator private immutable i_validatorContract;
+    // ISmartnodesCoordinator private immutable i_validatorContract;
     ISmartnodesToken private immutable i_tokenContract;
 
     /** State Variables */
@@ -93,14 +93,14 @@ contract SmartnodesCore {
     event NetworkAdded(uint8 indexed networkId, string name);
     event NetworkRemoved(uint8 indexed networkId);
 
-    modifier onlyCoordinator() {
-        if (msg.sender != address(i_validatorContract))
-            revert SmartnodesCore__NotValidatorMultisig();
-        _;
-    }
+    // modifier onlyCoordinator() {
+    //     if (msg.sender != address(i_validatorContract))
+    //         revert SmartnodesCore__NotValidatorMultisig();
+    //     _;
+    // }
 
-    constructor(address _validatorContract, address _tokenContract) {
-        i_validatorContract = ISmartnodesCoordinator(_validatorContract);
+    constructor(address _tokenContract) {
+        // i_validatorContract = ISmartnodesCoordinator(_validatorContract);
         i_tokenContract = ISmartnodesToken(_tokenContract);
 
         jobCounter = 0;
@@ -112,7 +112,7 @@ contract SmartnodesCore {
      * @notice Add a new network to the system
      * @param _name Name of the network
      */
-    function addNetwork(string calldata _name) external onlyCoordinator {
+    function addNetwork(string calldata _name) external {
         if (networkCounter >= MAX_NETWORKS)
             revert SmartnodesCore__InvalidNetworkId();
 
@@ -130,7 +130,7 @@ contract SmartnodesCore {
      * @notice Remove network from the system
      * @param _networkId network id
      */
-    function removeNetwork(uint8 _networkId) external onlyCoordinator {
+    function removeNetwork(uint8 _networkId) external {
         Network storage network = networks[_networkId];
 
         if (!network.exists) revert SmartnodesCore__InvalidNetworkId();
@@ -155,7 +155,7 @@ contract SmartnodesCore {
         validator.exists = true;
 
         // Lock tokens for the validator
-        i_tokenContract.lockTokens(validatorAddress);
+        i_tokenContract.lockTokens(validatorAddress, 1);
     }
 
     function createUser(bytes32 publicKeyHash) external {
@@ -234,12 +234,7 @@ contract SmartnodesCore {
                 _networkId
             );
         } else {
-            i_tokenContract.escrowPayment(
-                msg.sender,
-                finalPayment,
-                _networkId,
-                paymentType
-            );
+            i_tokenContract.escrowPayment(msg.sender, finalPayment, _networkId);
         }
 
         emit JobCreated(
@@ -259,7 +254,7 @@ contract SmartnodesCore {
         address[] calldata _validators,
         address[] calldata _workers,
         uint256[] calldata _capacities
-    ) external onlyCoordinator {
+    ) external {
         uint256 workersLength = _workers.length;
         uint256 capacitiesLength = _capacities.length;
         if (workersLength != capacitiesLength || _validators.length == 0) {
