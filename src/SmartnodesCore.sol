@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-// import {ISmartnodesCoordinator} from "./interfaces/ISmartnodesCoordinator.sol";
-import {ISmartnodesToken} from "./interfaces/ISmartnodesToken.sol";
+import {ISmartnodesCoordinator} from "./interfaces/ISmartnodesCoordinator.sol";
+import {ISmartnodesToken, PaymentAmounts} from "./interfaces/ISmartnodesToken.sol";
 
 /**
  * @title SmartnodesCore - Job Management System for Secure, Incentivised, Multi-Network P2P Resource Sharing
@@ -10,7 +10,7 @@ import {ISmartnodesToken} from "./interfaces/ISmartnodesToken.sol";
  * @dev Supports both SNO token and ETH payments
  */
 contract SmartnodesCore {
-    /** Errors */
+    // ============= Errors ==============
     error SmartnodesCore__InvalidNetworkId();
     error SmartnodesCore__InvalidUser();
     error SmartnodesCore__InvalidPayment();
@@ -20,6 +20,7 @@ contract SmartnodesCore {
     error SmartnodesCore__NotValidatorMultisig();
     error SmartnodesCore__NodeExists();
 
+    // ============= Events ==============
     enum JobState {
         DoesntExist,
         Pending,
@@ -33,16 +34,11 @@ contract SmartnodesCore {
     }
 
     /** Structs */
-    struct Validator {
+    struct Node {
+        // Can be a user or validator
         bytes32 publicKeyHash;
         uint8 reputation;
-        bool active;
-        bool exists;
-    }
-
-    struct User {
-        bytes32 publicKeyHash;
-        uint8 reputation;
+        bool locked;
         bool exists;
     }
 
@@ -50,7 +46,7 @@ contract SmartnodesCore {
         uint128 payment;
         uint8 networkId;
         uint8 state;
-        uint8 paymentType;
+        bool payWithSNO;
         address owner;
     }
 
@@ -64,15 +60,15 @@ contract SmartnodesCore {
     uint24 private constant UNLOCK_PERIOD = 14 days;
     uint8 private constant MAX_NETWORKS = 16;
 
-    // ISmartnodesCoordinator private immutable i_validatorContract;
     ISmartnodesToken private immutable i_tokenContract;
+    ISmartnodesCoordinator private immutable i_validatorContract;
 
     /** State Variables */
     uint256 public jobCounter;
     uint8 public networkCounter;
 
-    mapping(address => Validator) public validators;
-    mapping(address => User) public users;
+    mapping(address => Node) public validators;
+    mapping(address => Node) public users;
     mapping(bytes32 => Job) public jobs;
     mapping(uint8 => Network) public networks;
 
@@ -81,26 +77,26 @@ contract SmartnodesCore {
         bytes32 indexed jobId,
         uint8 networkId,
         uint128 payment,
-        uint8 paymentType
+        bool payWithSNO
     );
     event JobCreated(
         bytes32 indexed jobId,
         address indexed owner,
         uint8 networkId,
         uint128 payment,
-        uint8 paymentType
+        bool payWithSNO
     );
     event NetworkAdded(uint8 indexed networkId, string name);
     event NetworkRemoved(uint8 indexed networkId);
 
-    // modifier onlyCoordinator() {
-    //     if (msg.sender != address(i_validatorContract))
-    //         revert SmartnodesCore__NotValidatorMultisig();
-    //     _;
-    // }
+    modifier onlyCoordinator() {
+        if (msg.sender != address(i_validatorContract))
+            revert SmartnodesCore__NotValidatorMultisig();
+        _;
+    }
 
-    constructor(address _tokenContract) {
-        // i_validatorContract = ISmartnodesCoordinator(_validatorContract);
+    constructor(address _tokenContract, address _validatorContract) {
+        i_validatorContract = ISmartnodesCoordinator(_validatorContract);
         i_tokenContract = ISmartnodesToken(_tokenContract);
 
         jobCounter = 0;
@@ -146,21 +142,21 @@ contract SmartnodesCore {
      */
     function createValidator(bytes32 publicKeyHash) external {
         address validatorAddress = msg.sender;
-        Validator storage validator = validators[validatorAddress];
+        Node storage validator = validators[validatorAddress];
 
         if (validator.exists) revert SmartnodesCore__NodeExists();
 
         validator.publicKeyHash = publicKeyHash;
-        validator.active = false;
+        validator.locked = true;
         validator.exists = true;
 
         // Lock tokens for the validator
-        i_tokenContract.lockTokens(validatorAddress, 1);
+        i_tokenContract.lockTokens(validatorAddress, true);
     }
 
     function createUser(bytes32 publicKeyHash) external {
         address userAddress = msg.sender;
-        User storage user = users[userAddress];
+        Node storage user = users[userAddress];
 
         if (user.exists) revert SmartnodesCore__NodeExists();
 
@@ -183,7 +179,7 @@ contract SmartnodesCore {
         uint256[] calldata _capacities,
         uint128 _payment
     ) external payable {
-        if (_networkId >= networkCounter || _networkId == 0) {
+        if (_networkId > networkCounter || _networkId == 0) {
             revert SmartnodesCore__InvalidNetworkId();
         }
         if (_capacities.length == 0) {
@@ -191,7 +187,7 @@ contract SmartnodesCore {
         }
 
         Job storage job = jobs[_jobId];
-        User storage user = users[msg.sender]; // Fixed: should use msg.sender, not _userId
+        Node storage user = users[msg.sender]; // Fixed: should use msg.sender, not _userId
 
         if (job.owner != address(0)) {
             revert SmartnodesCore__JobExists();
@@ -203,19 +199,19 @@ contract SmartnodesCore {
         }
 
         // Determine payment type and amount
-        uint8 paymentType;
+        bool payWithSNO;
         uint128 finalPayment;
 
         if (_payment > 0 && msg.value > 0) {
-            revert SmartnodesCore__InvalidPayment(); // Can't pay with both
+            revert SmartnodesCore__InvalidPayment(); // Can't pay with both?
         }
 
         if (msg.value > 0) {
             finalPayment = uint128(msg.value);
-            paymentType = uint8(PaymentType.ETH);
+            payWithSNO = false;
         } else if (_payment > 0) {
             finalPayment = _payment;
-            paymentType = uint8(PaymentType.SNO_TOKEN);
+            payWithSNO = true;
         } else {
             revert SmartnodesCore__InvalidPayment();
         }
@@ -224,10 +220,10 @@ contract SmartnodesCore {
         job.owner = msg.sender;
         job.networkId = _networkId;
         job.state = uint8(JobState.Pending);
-        job.paymentType = paymentType;
+        job.payWithSNO = payWithSNO;
 
         // Handle escrow based on payment type
-        if (paymentType == uint8(PaymentType.ETH)) {
+        if (!payWithSNO) {
             i_tokenContract.escrowEthPayment{value: msg.value}(
                 msg.sender,
                 finalPayment,
@@ -242,7 +238,7 @@ contract SmartnodesCore {
             msg.sender,
             _networkId,
             finalPayment,
-            paymentType
+            payWithSNO
         );
     }
 
@@ -262,63 +258,62 @@ contract SmartnodesCore {
         }
 
         // Get any job payments associated with reward
-        (
-            uint256 additionalReward,
-            uint256 additionalEthReward
-        ) = _processCompletedJobs(_jobIds);
+        PaymentAmounts memory additionalRewards = _processCompletedJobs(
+            _jobIds
+        );
 
         i_tokenContract.mintRewards(
             _validators,
             _workers,
             _capacities,
-            additionalReward,
-            additionalEthReward
+            additionalRewards
         );
     }
 
     /**
      * @notice Processes completed jobs and returns any associated payments with job
      * @param _jobIds Array of job IDs that are being completed
-     * @return additionalReward Total additional reward to be distributed
-     * @return additionalEthReward Total additional ETH reward to be distributed
+     * @return additionalRewards -> total rewards to be distributed from payed jobs
      */
     function _processCompletedJobs(
         bytes32[] calldata _jobIds
-    ) internal returns (uint256 additionalReward, uint256 additionalEthReward) {
-        // Mark each job as complete, and get their associated payment
+    ) internal returns (PaymentAmounts memory additionalRewards) {
         uint256 jobIdsLength = _jobIds.length;
 
         for (uint256 i = 0; i < jobIdsLength; ) {
             bytes32 jobId = _jobIds[i];
-            Job storage job = jobs[jobId]; // Use storage to modify
+            Job storage job = jobs[jobId];
 
             uint128 payment = job.payment;
-            uint8 paymentType = job.paymentType;
-            uint8 networkId = job.networkId;
+            bool payWithSNO = job.payWithSNO;
             address owner = job.owner;
 
-            // If this was a job listed on contract, accumulate the payment and emit event
             if (job.networkId > 0) {
-                if (paymentType == uint8(PaymentType.ETH)) {
-                    additionalEthReward += payment;
-                    // Release escrowed ETH payment for reward distribution
+                // Accumulate rewards by type in single struct
+                if (!payWithSNO) {
+                    additionalRewards.eth += payment;
                     i_tokenContract.releaseEscrowedEthPayment(owner, payment);
                 } else {
-                    additionalReward += payment;
-                    // Release escrowed token payment for reward distribution
+                    additionalRewards.sno += payment;
                     i_tokenContract.releaseEscrowedPayment(owner, payment);
                 }
 
-                // Mark job as complete and clear storage
+                // Cleanup
                 job.state = uint8(JobState.Complete);
                 delete jobs[jobId];
 
-                emit JobCompleted(jobId, networkId, payment, paymentType);
+                emit JobCompleted(jobId, job.networkId, payment, payWithSNO);
             }
 
             unchecked {
                 ++i;
             }
         }
+    }
+
+    // ============= VIEW FUNCTIONS =============
+
+    function isLockedValidator(address validator) external view returns (bool) {
+        return (validators[validator].locked);
     }
 }

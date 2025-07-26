@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+struct PaymentAmounts {
+    uint128 sno;
+    uint128 eth;
+}
+
 /**
  * @title ISmartnodesToken Interface
  * @dev Interface for the SmartnodesToken contract
  */
 interface ISmartnodesToken {
-    function lockTokens(address _validator, uint8 _userType) external;
+    function lockTokens(address _validator, bool _isValidator) external;
 
-    function unlockTokens(address _validator, uint8 _userType) external;
+    function unlockTokens(address _validator, bool _isValidator) external;
 
     function escrowPayment(
         address _user,
@@ -30,8 +35,7 @@ interface ISmartnodesToken {
         address[] calldata _validators,
         address[] calldata _workers,
         uint256[] calldata _capacities,
-        uint256 _additionalReward,
-        uint256 _additionalEthReward
+        PaymentAmounts calldata _payments
     ) external;
 
     function getEmissionRate() external view returns (uint256);

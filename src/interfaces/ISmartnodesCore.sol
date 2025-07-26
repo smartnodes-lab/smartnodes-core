@@ -59,4 +59,6 @@ interface ISmartnodesCore {
             uint8 paymentType,
             address owner
         );
+
+    function isLockedValidator(address validator) external view returns (bool);
 }

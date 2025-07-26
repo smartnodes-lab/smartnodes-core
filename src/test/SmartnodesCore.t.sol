@@ -35,6 +35,8 @@ contract SmartnodesTest is Test {
         // Setup genesis nodes
         genesisNodes.push(validator1);
         genesisNodes.push(validator2);
+        genesisNodes.push(user1);
+        genesisNodes.push(user2);
 
         // Deploy
         deployer = new SmartnodesDeployer();
@@ -107,11 +109,11 @@ contract SmartnodesTest is Test {
         vm.prank(validator1);
         core.createValidator(VALIDATOR1_PUBKEY);
 
-        (bytes32 pubKeyHash, uint8 reputation, bool active, bool exists) = core
+        (bytes32 pubKeyHash, uint8 reputation, bool locked, bool exists) = core
             .validators(validator1);
         assertEq(pubKeyHash, VALIDATOR1_PUBKEY);
         assertEq(reputation, 0);
-        assertFalse(active);
+        assertTrue(locked);
         assertTrue(exists);
     }
 
@@ -128,9 +130,11 @@ contract SmartnodesTest is Test {
         vm.prank(user1);
         core.createUser(USER1_PUBKEY);
 
-        (bytes32 pubKeyHash, uint8 reputation, bool exists) = core.users(user1);
+        (bytes32 pubKeyHash, uint8 reputation, bool locked, bool exists) = core
+            .users(user1);
         assertEq(pubKeyHash, USER1_PUBKEY);
         assertEq(reputation, 1);
+        assertFalse(locked);
         assertTrue(exists);
     }
 
@@ -173,17 +177,17 @@ contract SmartnodesTest is Test {
             uint128 payment,
             uint8 networkId,
             uint8 state,
-            uint8 paymentType,
+            bool payWithSNO,
             address owner
         ) = core.jobs(JOB_ID_1);
         assertEq(payment, 1 ether);
         assertEq(networkId, 1);
         assertEq(state, 1); // Pending
-        assertEq(paymentType, 1); // ETH
+        assertEq(payWithSNO, false); // ETH
         assertEq(owner, user1);
     }
 
-    function testRequestJobWithSNOTokens() public {
+    function testRequestJobWithSNO() public {
         // Setup
         vm.startPrank(deployerAddr);
         core.addNetwork("Tensorlink");
@@ -203,13 +207,13 @@ contract SmartnodesTest is Test {
             uint128 jobPayment,
             uint8 networkId,
             uint8 state,
-            uint8 paymentType,
+            bool payWithSNO,
             address owner
         ) = core.jobs(JOB_ID_1);
         assertEq(jobPayment, payment);
         assertEq(networkId, 1);
         assertEq(state, 1); // Pending
-        assertEq(paymentType, 0); // SNO_TOKEN
+        assertEq(payWithSNO, true); // SNO_TOKEN
         assertEq(owner, user1);
     }
 }

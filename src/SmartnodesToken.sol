@@ -7,7 +7,6 @@ import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
 
 // import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
 // import {ERC20Permit} from "@openzeppelin/contracts/token/ER
-// import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 // import {Govenor} from "@openzeppelin/contracts/governance/Governor.sol";
 
 /**
@@ -18,23 +17,24 @@ import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
  */
 contract SmartnodesToken is ERC20, Ownable {
     /** Errors */
-    error SmartnodesToken__InsufficientBalance();
-    error SmartnodesToken__InvalidAddress();
-    error SmartnodesToken__AlreadyLocked();
-    error SmartnodesToken__NotLocked();
-    error SmartnodesToken__UnlockPending();
-    error SmartnodesToken__TransferFailed();
-    error SmartnodesToken__CoreNotSet();
-    error SmartnodesToken__CoreAlreadySet();
-
-    enum UserType {
-        USER,
-        VALIDATOR
-    }
+    error Token__InsufficientBalance();
+    error Token__InvalidAddress();
+    error Token__AlreadyLocked();
+    error Token__NotLocked();
+    error Token__UnlockPending();
+    error Token__TransferFailed();
+    error Token__CoreNotSet();
+    error Token__CoreAlreadySet();
 
     struct LockedTokens {
         bool locked;
+        bool isValidator;
         uint128 unlockTime;
+    }
+
+    struct PaymentAmounts {
+        uint128 sno;
+        uint128 eth;
     }
 
     /** Constants */
@@ -49,26 +49,24 @@ contract SmartnodesToken is ERC20, Ownable {
     /** State Variables */
     ISmartnodesCore public s_smartnodesCore; // Mutable reference instead of immutable
     bool public s_coreSet; // Flag to ensure core can only be set once
+
     uint256 public s_validatorLockAmount = 500_000e18;
     uint256 public s_userLockAmount = 500e18;
-    uint256 public s_daoTokenFunds;
-    uint256 public s_daoEthFunds;
-    uint256 public s_totalTokensUnclaimed;
-    uint256 public s_totalEthUnclaimed;
+
+    PaymentAmounts public s_daoFunds;
+    PaymentAmounts public s_totalUnclaimed;
 
     mapping(address => LockedTokens) private s_lockedTokens;
-    mapping(address => uint256) private s_unclaimedRewards;
-    mapping(address => uint256) private s_unclaimedEthRewards;
-    mapping(address => uint256) private s_totalClaimed;
-    mapping(address => uint256) private s_escrowedPayments;
-    mapping(address => uint256) private s_escrowedEthPayments;
+    mapping(address => PaymentAmounts) private s_unclaimedRewards;
+    mapping(address => PaymentAmounts) private s_totalClaimed;
+    mapping(address => PaymentAmounts) private s_escrowedPayments;
 
     modifier onlySmartnodesCore() {
         if (address(s_smartnodesCore) == address(0)) {
-            revert SmartnodesToken__CoreNotSet();
+            revert Token__CoreNotSet();
         }
         if (msg.sender != address(s_smartnodesCore)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
         _;
     }
@@ -85,8 +83,12 @@ contract SmartnodesToken is ERC20, Ownable {
     );
     event EscrowReleased(address indexed user, uint256 amount);
     event EthEscrowReleased(address indexed user, uint256 amount);
-    event TokensLocked(address indexed user, uint8 userType, uint256 amount);
-    event TokensUnlocked(address indexed user, uint8 userType, uint256 amount);
+    event TokensLocked(address indexed user, bool isValidator, uint256 amount);
+    event TokensUnlocked(
+        address indexed user,
+        bool isValidator,
+        uint256 amount
+    );
     event UnlockInitiated(address indexed user, uint256 unlockTime);
     event EthRewardsClaimed(address indexed user, uint256 amount);
     event TokenRewardsClaimed(address indexed user, uint256 amount);
@@ -111,10 +113,10 @@ contract SmartnodesToken is ERC20, Ownable {
      */
     function setSmartnodesCore(address _smartnodesCore) external onlyOwner {
         if (s_coreSet) {
-            revert SmartnodesToken__CoreAlreadySet();
+            revert Token__CoreAlreadySet();
         }
         if (_smartnodesCore == address(0)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
 
         s_smartnodesCore = ISmartnodesCore(_smartnodesCore);
@@ -131,29 +133,32 @@ contract SmartnodesToken is ERC20, Ownable {
      */
     function lockTokens(
         address _user,
-        uint8 _userType
+        bool _isValidator
     ) external onlySmartnodesCore {
         if (_user == address(0)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
 
         uint256 lockAmount;
-        if (_userType == uint8(UserType.USER)) {
-            lockAmount = s_userLockAmount;
-        } else if (_userType == uint8(UserType.VALIDATOR)) {
+
+        if (_isValidator) {
             lockAmount = s_validatorLockAmount;
+        } else {
+            lockAmount = s_userLockAmount;
         }
 
         if (balanceOf(_user) < lockAmount) {
-            revert SmartnodesToken__InsufficientBalance();
+            revert Token__InsufficientBalance();
         }
 
         LockedTokens storage locked = s_lockedTokens[_user];
-        if (locked.locked) revert SmartnodesToken__AlreadyLocked();
+        if (locked.locked) revert Token__AlreadyLocked();
 
         locked.locked = true;
+        locked.isValidator = _isValidator;
+
         _transfer(_user, address(this), lockAmount);
-        emit TokensLocked(_user, _userType, lockAmount);
+        emit TokensLocked(_user, _isValidator, lockAmount);
     }
 
     /**
@@ -161,12 +166,9 @@ contract SmartnodesToken is ERC20, Ownable {
      * @dev Can be called once to initiate the unlock process, and once again for claiming tokens after the unlock period
      * @param _user The address of the user unlocking tokens
      */
-    function unlockTokens(
-        address _user,
-        uint8 _userType
-    ) external onlySmartnodesCore {
+    function unlockTokens(address _user) external onlySmartnodesCore {
         if (_user == address(0)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
 
         LockedTokens storage locked = s_lockedTokens[_user];
@@ -174,25 +176,25 @@ contract SmartnodesToken is ERC20, Ownable {
             // If locked is false, the tokens are either already unlocking or were never locked
             if (locked.unlockTime == 0) {
                 // If tokens were never locked, revert
-                revert SmartnodesToken__NotLocked();
+                revert Token__NotLocked();
             }
 
             // Check if the unlock period has passed
             if (block.timestamp < locked.unlockTime + UNLOCK_PERIOD) {
-                revert SmartnodesToken__UnlockPending();
+                revert Token__UnlockPending();
             }
 
             // Finalize the unlock process
             uint256 lockAmount;
-            if (_userType == uint8(UserType.USER)) {
-                lockAmount = s_userLockAmount;
-            } else {
+            if (locked.isValidator) {
                 lockAmount = s_validatorLockAmount;
+            } else {
+                lockAmount = s_userLockAmount;
             }
 
             delete s_lockedTokens[_user];
             _transfer(address(this), _user, lockAmount);
-            emit TokensUnlocked(_user, _userType, lockAmount);
+            emit TokensUnlocked(_user, locked.isValidator, lockAmount);
         } else {
             // If locked is true, initiate the unlock process
             locked.locked = false;
@@ -213,15 +215,15 @@ contract SmartnodesToken is ERC20, Ownable {
         uint8 _networkId
     ) external onlySmartnodesCore {
         if (_user == address(0)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
         if (_payment == 0 || balanceOf(_user) < _payment) {
-            revert SmartnodesToken__InsufficientBalance();
+            revert Token__InsufficientBalance();
         }
 
         // Transfer payment to the contract
         _transfer(_user, address(this), _payment);
-        s_escrowedPayments[_user] += _payment;
+        s_escrowedPayments[_user].sno += uint128(_payment);
         emit PaymentEscrowed(_user, _payment, _networkId);
     }
 
@@ -237,13 +239,13 @@ contract SmartnodesToken is ERC20, Ownable {
         uint8 _networkId
     ) external payable onlySmartnodesCore {
         if (_user == address(0)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
         if (_payment == 0 || msg.value < _payment) {
-            revert SmartnodesToken__InsufficientBalance();
+            revert Token__InsufficientBalance();
         }
 
-        s_escrowedEthPayments[_user] += _payment;
+        s_escrowedPayments[_user].eth += uint128(_payment);
         emit EthPaymentEscrowed(_user, _payment, _networkId);
     }
 
@@ -258,14 +260,14 @@ contract SmartnodesToken is ERC20, Ownable {
         uint256 _amount
     ) external onlySmartnodesCore {
         if (_user == address(0)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
-        if (_amount == 0 || s_escrowedPayments[_user] < _amount) {
-            revert SmartnodesToken__InsufficientBalance();
+        if (_amount == 0 || s_escrowedPayments[_user].sno < _amount) {
+            revert Token__InsufficientBalance();
         }
 
         // Transfer the escrowed payment to the user
-        s_escrowedPayments[_user] -= _amount;
+        s_escrowedPayments[_user].sno -= uint128(_amount);
         emit EscrowReleased(_user, _amount);
     }
 
@@ -281,14 +283,14 @@ contract SmartnodesToken is ERC20, Ownable {
         uint256 _amount
     ) external onlySmartnodesCore {
         if (_user == address(0)) {
-            revert SmartnodesToken__InvalidAddress();
+            revert Token__InvalidAddress();
         }
-        if (_amount == 0 || s_escrowedEthPayments[_user] < _amount) {
-            revert SmartnodesToken__InsufficientBalance();
+        if (_amount == 0 || s_escrowedPayments[_user].eth < _amount) {
+            revert Token__InsufficientBalance();
         }
 
         // Reduce the escrowed amount (ETH stays in contract for reward distribution)
-        s_escrowedEthPayments[_user] -= _amount;
+        s_escrowedPayments[_user].eth -= uint128(_amount);
         emit EthEscrowReleased(_user, _amount);
     }
 
@@ -299,7 +301,7 @@ contract SmartnodesToken is ERC20, Ownable {
      * @param _validators Array of validator addresses who voted
      * @param _workers Array of worker addresses who performed work
      * @param _capacities Array of capacities for each worker (not used in this implementation)
-     * @param _additionalReward Additional reward to be added to the current emission rate
+     * @param _payments Additional payments to be added to the current emission rate
      * @dev Workers receive 90% of the total reward, validators receive 10%
      * @dev Rewards are distributed evenly among validators who voted, and distributed proportionally to workers based on their capacities
      * @dev Workers and validators can claim their rewards later
@@ -309,58 +311,75 @@ contract SmartnodesToken is ERC20, Ownable {
         address[] calldata _validators,
         address[] calldata _workers,
         uint256[] calldata _capacities,
-        uint256 _additionalReward,
-        uint256 _additionalEthReward
+        PaymentAmounts calldata _payments
     ) external onlySmartnodesCore {
-        uint256 totalTokenReward = getEmissionRate() + _additionalReward;
-        uint256 totalEthReward = _additionalEthReward;
+        // Total rewards to be distributed
+        PaymentAmounts memory totalReward = PaymentAmounts({
+            sno: uint128(getEmissionRate()) + _payments.sno,
+            eth: _payments.eth
+        });
 
         // DAO cut
-        uint256 daoTokenReward = (totalTokenReward * DAO_REWARD_PERCENTAGE) /
-            100;
-        uint256 daoEthReward = (totalEthReward * DAO_REWARD_PERCENTAGE) / 100;
-        totalTokenReward -= daoTokenReward;
-        totalEthReward -= daoEthReward;
+        PaymentAmounts memory daoReward = PaymentAmounts({
+            sno: uint128(
+                (uint256(totalReward.sno) * DAO_REWARD_PERCENTAGE) / 100
+            ),
+            eth: uint128(
+                (uint256(totalReward.eth) * DAO_REWARD_PERCENTAGE) / 100
+            )
+        });
 
-        s_daoTokenFunds += daoTokenReward;
-        s_daoEthFunds += daoEthReward;
-        s_totalTokensUnclaimed += totalTokenReward;
-        s_totalEthUnclaimed += totalEthReward;
+        // Update reward storage info
+        totalReward.sno -= daoReward.sno;
+        totalReward.eth -= daoReward.eth;
+
+        s_daoFunds.sno += daoReward.sno;
+        s_daoFunds.eth += daoReward.eth;
+        s_totalUnclaimed.sno += totalReward.sno;
+        s_totalUnclaimed.eth += totalReward.eth;
 
         // Split validator/worker share
-        (uint256 validatorToken, uint256 workerToken) = _splitReward(
-            totalTokenReward
+        PaymentAmounts memory validatorReward = _splitRewardForValidators(
+            totalReward
         );
-        (uint256 validatorEth, uint256 workerEth) = _splitReward(
-            totalEthReward
-        );
+        PaymentAmounts memory workerReward = PaymentAmounts({
+            sno: totalReward.sno - validatorReward.sno,
+            eth: totalReward.eth - validatorReward.eth
+        });
 
-        _distributeToValidators(_validators, validatorToken, validatorEth);
-        _distributeToWorkers(_workers, _capacities, workerToken, workerEth);
+        _distributeToValidators(_validators, validatorReward);
+        _distributeToWorkers(_workers, _capacities, workerReward);
     }
 
-    function _splitReward(
-        uint256 totalReward
-    ) internal pure returns (uint256 validatorShare, uint256 workerShare) {
-        if (totalReward == 0) return (0, 0);
-        workerShare = (totalReward * (100 - VALIDATOR_REWARD_PERCENTAGE)) / 100;
-        validatorShare = totalReward - workerShare;
+    function _splitRewardForValidators(
+        PaymentAmounts memory totalReward
+    ) internal pure returns (PaymentAmounts memory validatorReward) {
+        validatorReward = PaymentAmounts({
+            sno: uint128(
+                (uint256(totalReward.sno) * VALIDATOR_REWARD_PERCENTAGE) / 100
+            ),
+            eth: uint128(
+                (uint256(totalReward.eth) * VALIDATOR_REWARD_PERCENTAGE) / 100
+            )
+        });
     }
 
     function _distributeToValidators(
         address[] calldata validators,
-        uint256 tokenAmount,
-        uint256 ethAmount
+        PaymentAmounts memory totalReward
     ) internal {
         uint256 len = validators.length;
         if (len == 0) return;
-        uint256 tokenShare = tokenAmount / len;
-        uint256 ethShare = ethAmount > 0 ? ethAmount / len : 0;
+
+        PaymentAmounts memory sharePerValidator = PaymentAmounts({
+            sno: uint128(uint256(totalReward.sno) / len),
+            eth: uint128(uint256(totalReward.eth) / len)
+        });
 
         for (uint256 i = 0; i < len; ) {
             address v = validators[i];
-            s_unclaimedRewards[v] += tokenShare;
-            if (ethShare > 0) s_unclaimedEthRewards[v] += ethShare;
+            s_unclaimedRewards[v].sno += sharePerValidator.sno;
+            s_unclaimedRewards[v].eth += sharePerValidator.eth;
             unchecked {
                 ++i;
             }
@@ -370,8 +389,7 @@ contract SmartnodesToken is ERC20, Ownable {
     function _distributeToWorkers(
         address[] calldata workers,
         uint256[] calldata capacities,
-        uint256 tokenAmount,
-        uint256 ethAmount
+        PaymentAmounts memory totalReward
     ) internal {
         uint256 len = workers.length;
         if (len == 0) return;
@@ -389,13 +407,14 @@ contract SmartnodesToken is ERC20, Ownable {
             address w = workers[i];
             uint256 cap = capacities[i];
 
-            uint256 tokenShare = (tokenAmount * cap) / totalCapacity;
-            s_unclaimedRewards[w] += tokenShare;
+            PaymentAmounts memory workerShare = PaymentAmounts({
+                sno: uint128((uint256(totalReward.sno) * cap) / totalCapacity),
+                eth: uint128((uint256(totalReward.eth) * cap) / totalCapacity)
+            });
 
-            if (ethAmount > 0) {
-                uint256 ethShare = (ethAmount * cap) / totalCapacity;
-                s_unclaimedEthRewards[w] += ethShare;
-            }
+            s_unclaimedRewards[w].sno += workerShare.sno;
+            s_unclaimedRewards[w].eth += workerShare.eth;
+
             unchecked {
                 ++i;
             }
@@ -403,25 +422,90 @@ contract SmartnodesToken is ERC20, Ownable {
     }
 
     /**
-     * @notice Claim unclaimed rewards for a worker or validator
-     * @dev Workers and validators can call this function to claim their unclaimed rewards
+     * @notice Claim unclaimed SNO token rewards for a worker or validator
+     * @dev Workers and validators can call this function to claim their unclaimed SNO token rewards
      */
-    function claimRewards() external {
-        uint256 unclaimed = s_unclaimedRewards[msg.sender];
+    function claimTokenRewards() external {
+        uint256 unclaimed = s_unclaimedRewards[msg.sender].sno;
 
         if (unclaimed == 0) {
-            revert SmartnodesToken__InsufficientBalance();
+            revert Token__InsufficientBalance();
         }
 
-        // Reset unclaimed rewards for the caller
-        s_unclaimedRewards[msg.sender] = 0;
-        s_totalTokensUnclaimed -= unclaimed;
+        // Reset unclaimed token rewards for the caller
+        s_unclaimedRewards[msg.sender].sno = 0;
+        s_totalUnclaimed.sno -= uint128(unclaimed);
 
         // Update total claimed rewards
-        s_totalClaimed[msg.sender] += unclaimed;
+        s_totalClaimed[msg.sender].sno += uint128(unclaimed);
 
         // Mint the claimed rewards to the caller
         _mint(msg.sender, unclaimed);
+        emit TokenRewardsClaimed(msg.sender, unclaimed);
+    }
+
+    /**
+     * @notice Claim unclaimed ETH rewards for a worker or validator
+     * @dev Workers and validators can call this function to claim their unclaimed ETH rewards
+     */
+    function claimEthRewards() external {
+        uint256 unclaimed = s_unclaimedRewards[msg.sender].eth;
+
+        if (unclaimed == 0) {
+            revert Token__InsufficientBalance();
+        }
+
+        // Reset unclaimed ETH rewards for the caller
+        s_unclaimedRewards[msg.sender].eth = 0;
+        s_totalUnclaimed.eth -= uint128(unclaimed);
+
+        // Update total claimed rewards
+        s_totalClaimed[msg.sender].eth += uint128(unclaimed);
+
+        // Transfer ETH to the caller
+        (bool success, ) = payable(msg.sender).call{value: unclaimed}("");
+        if (!success) {
+            revert Token__TransferFailed();
+        }
+        emit EthRewardsClaimed(msg.sender, unclaimed);
+    }
+
+    /**
+     * @notice Claim both SNO token and ETH rewards in a single transaction
+     * @dev More gas efficient than calling both claim functions separately
+     */
+    function claimAllRewards() external {
+        PaymentAmounts memory unclaimed = s_unclaimedRewards[msg.sender];
+
+        if (unclaimed.sno == 0 && unclaimed.eth == 0) {
+            revert Token__InsufficientBalance();
+        }
+
+        // Reset all unclaimed rewards for the caller
+        delete s_unclaimedRewards[msg.sender];
+        s_totalUnclaimed.sno -= unclaimed.sno;
+        s_totalUnclaimed.eth -= unclaimed.eth;
+
+        // Update total claimed rewards
+        s_totalClaimed[msg.sender].sno += unclaimed.sno;
+        s_totalClaimed[msg.sender].eth += unclaimed.eth;
+
+        // Mint SNO tokens if any
+        if (unclaimed.sno > 0) {
+            _mint(msg.sender, unclaimed.sno);
+            emit TokenRewardsClaimed(msg.sender, unclaimed.sno);
+        }
+
+        // Transfer ETH if any
+        if (unclaimed.eth > 0) {
+            (bool success, ) = payable(msg.sender).call{value: unclaimed.eth}(
+                ""
+            );
+            if (!success) {
+                revert Token__TransferFailed();
+            }
+            emit EthRewardsClaimed(msg.sender, unclaimed.eth);
+        }
     }
 
     /**
@@ -466,12 +550,39 @@ contract SmartnodesToken is ERC20, Ownable {
         emissionRate = _emissionForEra(era);
     }
 
-    // =============== DAO Functions ===============
+    // =============== View Functions ===============
 
     /**
      * @dev Get the current SmartnodesCore contract address
      */
     function getSmartnodesCore() external view returns (address) {
         return address(s_smartnodesCore);
+    }
+
+    /**
+     * @dev Get unclaimed rewards for a specific address
+     */
+    function getUnclaimedRewards(
+        address _user
+    ) external view returns (PaymentAmounts memory) {
+        return s_unclaimedRewards[_user];
+    }
+
+    /**
+     * @dev Get total claimed rewards for a specific address
+     */
+    function getTotalClaimed(
+        address _user
+    ) external view returns (PaymentAmounts memory) {
+        return s_totalClaimed[_user];
+    }
+
+    /**
+     * @dev Get escrowed payments for a specific address
+     */
+    function getEscrowedPayments(
+        address _user
+    ) external view returns (PaymentAmounts memory) {
+        return s_escrowedPayments[_user];
     }
 }
