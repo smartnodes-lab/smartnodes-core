@@ -116,7 +116,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     constructor(
         uint128 _updateTime,
         uint8 _requiredApprovalsPercentage,
-        address _smartnodesCore
+        address _smartnodesCore,
+        address[] memory _genesisNodes
     ) {
         if (
             _requiredApprovalsPercentage == 0 ||
@@ -133,9 +134,9 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         timeConfig = TimeConfig({
             updateTime: _updateTime,
-            lastExecutionTime: uint128(block.timestamp)
+            lastExecutionTime: 0 // This is set to 0, which allows the first proposal to be submitted by any validator
         });
-
+        currentRoundValidators = _genesisNodes;
         roundData = RoundData({currentRoundId: 1, nextProposalId: 1});
     }
 
@@ -506,7 +507,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     function _isCurrentRoundExpired() internal view returns (bool) {
         TimeConfig memory tc = timeConfig;
-        return block.timestamp > tc.lastExecutionTime + (tc.updateTime << 1); // * 2 using bit shift
+        return block.timestamp > tc.lastExecutionTime + (tc.updateTime << 1);
     }
 
     // ============= VIEW FUNCTIONS =============

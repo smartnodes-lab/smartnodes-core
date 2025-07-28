@@ -61,9 +61,10 @@ contract SmartnodesCore {
     uint8 private constant MAX_NETWORKS = 16;
 
     ISmartnodesToken private immutable i_tokenContract;
-    ISmartnodesCoordinator private immutable i_validatorContract;
 
     /** State Variables */
+    ISmartnodesCoordinator private validatorContract;
+
     uint256 public jobCounter;
     uint8 public networkCounter;
 
@@ -90,17 +91,22 @@ contract SmartnodesCore {
     event NetworkRemoved(uint8 indexed networkId);
 
     modifier onlyCoordinator() {
-        if (msg.sender != address(i_validatorContract))
+        if (msg.sender != address(validatorContract))
             revert SmartnodesCore__NotValidatorMultisig();
         _;
     }
 
-    constructor(address _tokenContract, address _validatorContract) {
-        i_validatorContract = ISmartnodesCoordinator(_validatorContract);
+    constructor(address _tokenContract) {
         i_tokenContract = ISmartnodesToken(_tokenContract);
 
         jobCounter = 0;
         networkCounter = 0;
+    }
+
+    function setCoordinator(address _validatorContract) external {
+        if (address(validatorContract) == address(0)) {
+            validatorContract = ISmartnodesCoordinator(_validatorContract);
+        }
     }
 
     // ============= Core Functions =============

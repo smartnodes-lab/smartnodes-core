@@ -103,7 +103,7 @@ contract SmartnodesToken is ERC20, Ownable {
         // Mint initial tokens to genesis nodes
         uint256 gensisNodesLength = _genesisNodes.length;
         for (uint256 i = 0; i < gensisNodesLength; i++) {
-            _mint(_genesisNodes[i], s_validatorLockAmount);
+            _mint(_genesisNodes[i], s_validatorLockAmount * 2);
         }
     }
 

@@ -1,55 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import {Test, console} from "forge-std/Test.sol";
-import {SmartnodesToken} from "../SmartnodesToken.sol";
-import {SmartnodesCore} from "../SmartnodesCore.sol";
-import {SmartnodesDeployer} from "./SmartnodesDeployer.sol";
+import {BaseSmartnodesTest} from "./BaseTest.sol";
+import {SmartnodesCore} from "../src/SmartnodesCore.sol";
 
-contract SmartnodesTest is Test {
-    SmartnodesToken public token;
-    SmartnodesCore public core;
-    SmartnodesDeployer public deployer;
-
-    // Test addresses
-    address public deployerAddr = makeAddr("deployer");
-    address public user1 = makeAddr("user1");
-    address public user2 = makeAddr("user2");
-    address public validator1 = makeAddr("validator1");
-    address public validator2 = makeAddr("validator2");
-    address public worker1 = makeAddr("worker1");
-    address public worker2 = makeAddr("worker2");
-    address[] public genesisNodes;
-
-    // Test constants
-    bytes32 constant USER1_PUBKEY = keccak256("user1_pubkey");
-    bytes32 constant USER2_PUBKEY = keccak256("user2_pubkey");
-    bytes32 constant VALIDATOR1_PUBKEY = keccak256("validator1_pubkey");
-    bytes32 constant VALIDATOR2_PUBKEY = keccak256("validator2_pubkey");
-    bytes32 constant JOB_ID_1 = keccak256("job1");
-    bytes32 constant JOB_ID_2 = keccak256("job2");
-
-    function setUp() public {
-        vm.startPrank(deployerAddr);
-
-        // Setup genesis nodes
-        genesisNodes.push(validator1);
-        genesisNodes.push(validator2);
-        genesisNodes.push(user1);
-        genesisNodes.push(user2);
-
-        // Deploy
-        deployer = new SmartnodesDeployer();
-        (address tokenAddress, address coreAddress) = deployer
-            .deploySmartnodesEcosystem(genesisNodes);
-
-        // Create contract instances
-        token = SmartnodesToken(tokenAddress);
-        core = SmartnodesCore(coreAddress);
-
-        vm.stopPrank();
-    }
-
+/**
+ * @title SmartnodesCoreTest
+ * @notice Tests for SmartnodesCore contract functionality
+ */
+contract SmartnodesCoreTest is BaseSmartnodesTest {
     function testAddNetwork() public {
         vm.prank(deployerAddr);
         core.addNetwork("Tensorlink");
@@ -79,20 +38,19 @@ contract SmartnodesTest is Test {
     }
 
     function testRemoveNetwork() public {
-        vm.startPrank(deployerAddr);
-        core.addNetwork("Ethereum");
+        addTestNetwork("Ethereum");
 
         // Verify network exists
         (, bool existsBefore, ) = core.networks(1);
         assertTrue(existsBefore);
 
         // Remove network
+        vm.prank(deployerAddr);
         core.removeNetwork(1);
 
         // Verify network is removed
         (, bool existsAfter, ) = core.networks(1);
         assertFalse(existsAfter);
-        vm.stopPrank();
     }
 
     function testRemoveNonExistentNetwork() public {
@@ -106,8 +64,7 @@ contract SmartnodesTest is Test {
     // ============= Node Management Tests =============
 
     function testCreateValidator() public {
-        vm.prank(validator1);
-        core.createValidator(VALIDATOR1_PUBKEY);
+        createTestValidator(validator1, VALIDATOR1_PUBKEY);
 
         (bytes32 pubKeyHash, uint8 reputation, bool locked, bool exists) = core
             .validators(validator1);
@@ -118,17 +75,15 @@ contract SmartnodesTest is Test {
     }
 
     function testCreateValidatorDuplicate() public {
-        vm.startPrank(validator1);
-        core.createValidator(VALIDATOR1_PUBKEY);
+        createTestValidator(validator1, VALIDATOR1_PUBKEY);
 
         vm.expectRevert(SmartnodesCore.SmartnodesCore__NodeExists.selector);
+        vm.prank(validator1);
         core.createValidator(VALIDATOR1_PUBKEY);
-        vm.stopPrank();
     }
 
     function testCreateUser() public {
-        vm.prank(user1);
-        core.createUser(USER1_PUBKEY);
+        createTestUser(user1, USER1_PUBKEY);
 
         (bytes32 pubKeyHash, uint8 reputation, bool locked, bool exists) = core
             .users(user1);
@@ -139,39 +94,25 @@ contract SmartnodesTest is Test {
     }
 
     function testCreateUserDuplicate() public {
-        vm.startPrank(user1);
-        core.createUser(USER1_PUBKEY);
+        createTestUser(user1, USER1_PUBKEY);
 
         vm.expectRevert(SmartnodesCore.SmartnodesCore__NodeExists.selector);
+        vm.prank(user1);
         core.createUser(USER1_PUBKEY);
-        vm.stopPrank();
     }
 
     // ============= Job Management Tests =============
 
     function testRequestJobWithETH() public {
         // Setup
-        vm.startPrank(deployerAddr);
-        core.addNetwork("Tensorlink");
-        vm.stopPrank();
-
-        vm.prank(user1);
-        core.createUser(USER1_PUBKEY);
-
-        // Fund user1 with ETH
-        vm.deal(user1, 10 ether);
+        addTestNetwork("Tensorlink");
+        createTestUser(user1, USER1_PUBKEY);
+        fundUserWithETH(user1, 10 ether);
 
         uint256[] memory capacities = new uint256[](1);
         capacities[0] = 100;
 
-        vm.prank(user1);
-        core.requestJob{value: 1 ether}(
-            USER1_PUBKEY,
-            JOB_ID_1,
-            1,
-            capacities,
-            0
-        );
+        createTestJob(user1, JOB_ID_1, 1, capacities, 1 ether);
 
         (
             uint128 payment,
@@ -189,19 +130,13 @@ contract SmartnodesTest is Test {
 
     function testRequestJobWithSNO() public {
         // Setup
-        vm.startPrank(deployerAddr);
-        core.addNetwork("Tensorlink");
-        vm.stopPrank();
-
-        vm.prank(user1);
-        core.createUser(USER1_PUBKEY);
+        addTestNetwork("Tensorlink");
+        createTestUser(user1, USER1_PUBKEY);
 
         uint256[] memory capacities = new uint256[](1);
         capacities[0] = 100;
-        uint128 payment = 1000e18; // 1000 SNO tokens
 
-        vm.prank(user1);
-        core.requestJob(USER1_PUBKEY, JOB_ID_1, 1, capacities, payment);
+        createTestJob(user1, JOB_ID_1, 1, capacities, 0); // 0 ETH means SNO payment
 
         (
             uint128 jobPayment,
@@ -210,7 +145,7 @@ contract SmartnodesTest is Test {
             bool payWithSNO,
             address owner
         ) = core.jobs(JOB_ID_1);
-        assertEq(jobPayment, payment);
+        assertEq(jobPayment, 1000e18); // Default SNO payment from helper
         assertEq(networkId, 1);
         assertEq(state, 1); // Pending
         assertEq(payWithSNO, true); // SNO_TOKEN

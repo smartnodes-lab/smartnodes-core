@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import {SmartnodesToken} from "../SmartnodesToken.sol";
-import {SmartnodesCore} from "../SmartnodesCore.sol";
+import {SmartnodesToken} from "./SmartnodesToken.sol";
+import {SmartnodesCore} from "./SmartnodesCore.sol";
+import {SmartnodesCoordinator} from "./SmartnodesCoordinator.sol";
 
 /**
  * @title SmartnodesDeployer
@@ -33,7 +34,14 @@ contract SmartnodesDeployer {
      */
     function deploySmartnodesEcosystem(
         address[] memory _genesisNodes
-    ) public returns (address tokenAddress, address coreAddress) {
+    )
+        public
+        returns (
+            address tokenAddress,
+            address coreAddress,
+            address coordinatorAddress
+        )
+    {
         // Validate genesis nodes
         require(
             _genesisNodes.length > 0,
@@ -59,10 +67,12 @@ contract SmartnodesDeployer {
 
         try this._deployContracts(_genesisNodes) returns (
             address token,
-            address core
+            address core,
+            address coordinator
         ) {
             tokenAddress = token;
             coreAddress = core;
+            coordinatorAddress = coordinator;
 
             emit SmartnodesEcosystemDeployed(
                 tokenAddress,
@@ -87,7 +97,14 @@ contract SmartnodesDeployer {
      */
     function _deployContracts(
         address[] memory _genesisNodes
-    ) external returns (address tokenAddress, address coreAddress) {
+    )
+        external
+        returns (
+            address tokenAddress,
+            address coreAddress,
+            address coordinatorAddress
+        )
+    {
         require(msg.sender == address(this), "Internal function only");
 
         // Step 1: Deploy SmartnodesToken first
@@ -98,10 +115,20 @@ contract SmartnodesDeployer {
         SmartnodesCore core = new SmartnodesCore(tokenAddress);
         coreAddress = address(core);
 
-        // Step 3: Set the core contract in token (critical for proper functioning)
-        token.setSmartnodesCore(coreAddress);
+        // Step 3: Deploy SmartnodesCoordinator with core address
+        SmartnodesCoordinator coordinator = new SmartnodesCoordinator(
+            uint128(3600), // Update time (1 hour)
+            uint8(66), // Approvals percentage
+            coreAddress,
+            _genesisNodes
+        );
+        coordinatorAddress = address(coordinator);
 
-        // Step 4: Transfer token ownership to deployer (msg.sender of original call)
+        // Step 4: Set the core contract in token (critical for proper functioning)
+        token.setSmartnodesCore(coreAddress);
+        core.setCoordinator(coordinatorAddress);
+
+        // Step 5: Transfer token ownership to deployer (msg.sender of original call)
         token.transferOwnership(tx.origin);
     }
 
@@ -129,18 +156,21 @@ contract SmartnodesDeployer {
      */
     function batchDeploy(
         DeploymentConfig[] memory configs
-    ) external returns (address[2][] memory deployments) {
+    ) external returns (address[3][] memory deployments) {
         require(configs.length > 0, "No configurations provided");
         require(configs.length <= 5, "Too many batch deployments");
 
-        deployments = new address[2][](configs.length);
+        deployments = new address[3][](configs.length);
 
         for (uint256 i = 0; i < configs.length; i++) {
-            (address token, address core) = deploySmartnodesEcosystem(
-                configs[i].genesisNodes
-            );
+            (
+                address token,
+                address core,
+                address coordinator
+            ) = deploySmartnodesEcosystem(configs[i].genesisNodes);
             deployments[i][0] = token;
             deployments[i][1] = core;
+            deployments[i][2] = coordinator;
         }
     }
 }
