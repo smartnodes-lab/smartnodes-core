@@ -6,6 +6,7 @@ import {SmartnodesToken} from "../src/SmartnodesToken.sol";
 import {SmartnodesCore} from "../src/SmartnodesCore.sol";
 import {SmartnodesDeployer} from "../src/SmartnodesDeployer.sol";
 import {SmartnodesCoordinator} from "../src/SmartnodesCoordinator.sol";
+import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
 
 /**
  * @title BaseSmartnodesTest
@@ -17,6 +18,7 @@ abstract contract BaseSmartnodesTest is Test {
     SmartnodesCore public core;
     SmartnodesCoordinator public coordinator;
     SmartnodesDeployer public deployer;
+    SmartnodesDAO public dao;
 
     // Test addresses
     address public deployerAddr = makeAddr("deployer");
@@ -58,13 +60,15 @@ abstract contract BaseSmartnodesTest is Test {
         (
             address tokenAddress,
             address coreAddress,
-            address coordinatorAddress
+            address coordinatorAddress,
+            address daoAddress
         ) = deployer.deploySmartnodesEcosystem(genesisNodes);
 
         // Create contract instances
         token = SmartnodesToken(tokenAddress);
         core = SmartnodesCore(coreAddress);
         coordinator = SmartnodesCoordinator(coordinatorAddress);
+        dao = SmartnodesDAO(daoAddress);
 
         vm.stopPrank();
     }
@@ -89,6 +93,7 @@ abstract contract BaseSmartnodesTest is Test {
     function createTestValidator(address validator, bytes32 pubkey) internal {
         vm.prank(validator);
         core.createValidator(pubkey);
+        coordinator.addValidator(validator);
     }
 
     function createTestUser(address user, bytes32 pubkey) internal {

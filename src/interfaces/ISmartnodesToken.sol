@@ -40,11 +40,9 @@ interface ISmartnodesToken {
 
     function getEmissionRate() external view returns (uint256);
 
-    function getUnclaimedTokenRewards(
+    function getUnclaimedRewards(
         address _user
-    ) external view returns (uint256);
+    ) external view returns (PaymentAmounts memory);
 
-    function getUnclaimedEthRewards(
-        address _user
-    ) external view returns (uint256);
+    function getTotalUnclaimed() external view returns (uint128, uint128);
 }

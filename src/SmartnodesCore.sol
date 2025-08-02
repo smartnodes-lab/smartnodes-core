@@ -11,14 +11,14 @@ import {ISmartnodesToken, PaymentAmounts} from "./interfaces/ISmartnodesToken.so
  */
 contract SmartnodesCore {
     // ============= Errors ==============
-    error SmartnodesCore__InvalidNetworkId();
-    error SmartnodesCore__InvalidUser();
-    error SmartnodesCore__InvalidPayment();
-    error SmartnodesCore__InvalidArrayLength();
-    error SmartnodesCore__InsufficientBalance();
-    error SmartnodesCore__JobExists();
-    error SmartnodesCore__NotValidatorMultisig();
-    error SmartnodesCore__NodeExists();
+    error Core__InvalidNetworkId();
+    error Core__InvalidUser();
+    error Core__InvalidPayment();
+    error Core__InvalidArrayLength();
+    error Core__InsufficientBalance();
+    error Core__JobExists();
+    error Core__NotValidatorMultisig();
+    error Core__NodeExists();
 
     // ============= Events ==============
     enum JobState {
@@ -82,7 +82,7 @@ contract SmartnodesCore {
     );
     event JobCreated(
         bytes32 indexed jobId,
-        address indexed owner,
+        bytes32 indexed owner,
         uint8 networkId,
         uint128 payment,
         bool payWithSNO
@@ -92,7 +92,7 @@ contract SmartnodesCore {
 
     modifier onlyCoordinator() {
         if (msg.sender != address(validatorContract))
-            revert SmartnodesCore__NotValidatorMultisig();
+            revert Core__NotValidatorMultisig();
         _;
     }
 
@@ -115,8 +115,7 @@ contract SmartnodesCore {
      * @param _name Name of the network
      */
     function addNetwork(string calldata _name) external {
-        if (networkCounter >= MAX_NETWORKS)
-            revert SmartnodesCore__InvalidNetworkId();
+        if (networkCounter >= MAX_NETWORKS) revert Core__InvalidNetworkId();
 
         uint8 newNetworkId = ++networkCounter;
         networks[newNetworkId] = Network({
@@ -135,7 +134,7 @@ contract SmartnodesCore {
     function removeNetwork(uint8 _networkId) external {
         Network storage network = networks[_networkId];
 
-        if (!network.exists) revert SmartnodesCore__InvalidNetworkId();
+        if (!network.exists) revert Core__InvalidNetworkId();
 
         delete networks[_networkId];
 
@@ -150,7 +149,7 @@ contract SmartnodesCore {
         address validatorAddress = msg.sender;
         Node storage validator = validators[validatorAddress];
 
-        if (validator.exists) revert SmartnodesCore__NodeExists();
+        if (validator.exists) revert Core__NodeExists();
 
         validator.publicKeyHash = publicKeyHash;
         validator.locked = true;
@@ -164,7 +163,7 @@ contract SmartnodesCore {
         address userAddress = msg.sender;
         Node storage user = users[userAddress];
 
-        if (user.exists) revert SmartnodesCore__NodeExists();
+        if (user.exists) revert Core__NodeExists();
 
         user.publicKeyHash = publicKeyHash;
         user.reputation = 1;
@@ -186,22 +185,22 @@ contract SmartnodesCore {
         uint128 _payment
     ) external payable {
         if (_networkId > networkCounter || _networkId == 0) {
-            revert SmartnodesCore__InvalidNetworkId();
+            revert Core__InvalidNetworkId();
         }
         if (_capacities.length == 0) {
-            revert SmartnodesCore__InvalidArrayLength();
+            revert Core__InvalidArrayLength();
         }
 
         Job storage job = jobs[_jobId];
         Node storage user = users[msg.sender]; // Fixed: should use msg.sender, not _userId
 
         if (job.owner != address(0)) {
-            revert SmartnodesCore__JobExists();
+            revert Core__JobExists();
         }
 
         if (!user.exists || user.reputation == 0) {
             // Fixed: check if user exists
-            revert SmartnodesCore__InvalidUser();
+            revert Core__InvalidUser();
         }
 
         // Determine payment type and amount
@@ -209,7 +208,7 @@ contract SmartnodesCore {
         uint128 finalPayment;
 
         if (_payment > 0 && msg.value > 0) {
-            revert SmartnodesCore__InvalidPayment(); // Can't pay with both?
+            revert Core__InvalidPayment(); // Can't pay with both?
         }
 
         if (msg.value > 0) {
@@ -219,7 +218,7 @@ contract SmartnodesCore {
             finalPayment = _payment;
             payWithSNO = true;
         } else {
-            revert SmartnodesCore__InvalidPayment();
+            revert Core__InvalidPayment();
         }
 
         job.payment = finalPayment;
@@ -239,13 +238,7 @@ contract SmartnodesCore {
             i_tokenContract.escrowPayment(msg.sender, finalPayment, _networkId);
         }
 
-        emit JobCreated(
-            _jobId,
-            msg.sender,
-            _networkId,
-            finalPayment,
-            payWithSNO
-        );
+        emit JobCreated(_jobId, _userId, _networkId, finalPayment, payWithSNO);
     }
 
     /**
@@ -260,7 +253,7 @@ contract SmartnodesCore {
         uint256 workersLength = _workers.length;
         uint256 capacitiesLength = _capacities.length;
         if (workersLength != capacitiesLength || _validators.length == 0) {
-            revert SmartnodesCore__InvalidArrayLength();
+            revert Core__InvalidArrayLength();
         }
 
         // Get any job payments associated with reward
@@ -321,5 +314,9 @@ contract SmartnodesCore {
 
     function isLockedValidator(address validator) external view returns (bool) {
         return (validators[validator].locked);
+    }
+
+    function getCoordinator() external view returns (address) {
+        return (address(validatorContract));
     }
 }

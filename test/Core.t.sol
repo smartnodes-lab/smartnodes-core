@@ -29,9 +29,7 @@ contract SmartnodesCoreTest is BaseSmartnodesTest {
         }
 
         // Try to add 17th network - should revert
-        vm.expectRevert(
-            SmartnodesCore.SmartnodesCore__InvalidNetworkId.selector
-        );
+        vm.expectRevert(SmartnodesCore.Core__InvalidNetworkId.selector);
         core.addNetwork("Network17");
 
         vm.stopPrank();
@@ -55,9 +53,7 @@ contract SmartnodesCoreTest is BaseSmartnodesTest {
 
     function testRemoveNonExistentNetwork() public {
         vm.prank(deployerAddr);
-        vm.expectRevert(
-            SmartnodesCore.SmartnodesCore__InvalidNetworkId.selector
-        );
+        vm.expectRevert(SmartnodesCore.Core__InvalidNetworkId.selector);
         core.removeNetwork(1);
     }
 
@@ -77,7 +73,7 @@ contract SmartnodesCoreTest is BaseSmartnodesTest {
     function testCreateValidatorDuplicate() public {
         createTestValidator(validator1, VALIDATOR1_PUBKEY);
 
-        vm.expectRevert(SmartnodesCore.SmartnodesCore__NodeExists.selector);
+        vm.expectRevert(SmartnodesCore.Core__NodeExists.selector);
         vm.prank(validator1);
         core.createValidator(VALIDATOR1_PUBKEY);
     }
@@ -96,7 +92,7 @@ contract SmartnodesCoreTest is BaseSmartnodesTest {
     function testCreateUserDuplicate() public {
         createTestUser(user1, USER1_PUBKEY);
 
-        vm.expectRevert(SmartnodesCore.SmartnodesCore__NodeExists.selector);
+        vm.expectRevert(SmartnodesCore.Core__NodeExists.selector);
         vm.prank(user1);
         core.createUser(USER1_PUBKEY);
     }

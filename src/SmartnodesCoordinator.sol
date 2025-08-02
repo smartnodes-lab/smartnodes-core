@@ -8,7 +8,6 @@ import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
  * @title SmartnodesCoordinator
  * @notice Manages job and user participation updates to SmartnodesCore contract. Updates are
  * @notice controlled by a rotating set of validators that vote on these state updates periodically.
- * @dev Optimized multi-signature coordinator for managing SmartnodesCore contract
  */
 contract SmartnodesCoordinator is ReentrancyGuard {
     // ============= Errors ==============
@@ -27,6 +26,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     error Coordinator__NotEnoughActiveValidators();
     error Coordinator__InvalidApprovalPercentage();
     error Coordinator__InvalidAddress();
+    error Coordinator__ProposalExpired();
 
     // ============= Structs ==============
     struct Proposal {
@@ -57,6 +57,11 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     uint256 public requiredValidators;
 
+    // Proposal cleanup configuration
+    uint256 public constant MAX_PROPOSAL_AGE = 7 days; // Proposals older than 7 days can be cleaned up
+    uint256 public constant CLEANUP_BATCH_SIZE = 50; // Max proposals to clean in one call
+    uint256 public oldestProposalId = 1; // Track oldest proposal for efficient cleanup
+
     // Validator management
     address[] public validators;
     address[] public currentRoundValidators;
@@ -78,6 +83,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         bytes32 indexed proposalHash
     );
     event ProposalExpired(uint256 indexed proposalId);
+    event ProposalsCleanedUp(uint256 fromId, uint256 toId, uint256 count);
     event ValidatorAdded(address indexed validator);
     event ValidatorRemoved(address indexed validator);
     event RoundStarted(uint256 indexed roundId, address[] selectedValidators);
@@ -110,6 +116,16 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         } else if (validatorToProposal[msg.sender] != 0) {
             revert Coordinator__AlreadySubmittedProposal();
         }
+        _;
+    }
+
+    modifier validProposal(uint256 proposalId) {
+        Proposal storage proposal = proposals[proposalId];
+        if (proposal.creator == address(0))
+            revert Coordinator__InvalidProposalNumber();
+        if (proposal.executed) revert Coordinator__InvalidProposalNumber();
+        if (_isProposalExpired(proposalId))
+            revert Coordinator__ProposalExpired();
         _;
     }
 
@@ -177,13 +193,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
      */
     function voteForProposal(
         uint256 proposalId
-    ) external onlyValidator nonReentrant {
-        Proposal storage proposal = proposals[proposalId];
-
-        if (proposal.creator == address(0) || proposal.executed) {
-            revert Coordinator__InvalidProposalNumber();
-        }
-
+    ) external onlyValidator validProposal(proposalId) nonReentrant {
         if (!_isCurrentRoundExpired() && validatorVote[msg.sender] != 0) {
             revert Coordinator__AlreadyVoted();
         }
@@ -196,6 +206,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         validatorVote[msg.sender] = proposalId;
 
         // Increment votes and check threshold in one go
+        Proposal storage proposal = proposals[proposalId];
         uint16 newVotes = ++proposal.votes;
         uint256 requiredVotes = _calculateRequiredVotes();
 
@@ -218,13 +229,12 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         bytes32[] calldata jobHashes,
         address[] calldata jobWorkers,
         uint256[] calldata jobCapacities
-    ) external onlyValidator nonReentrant {
+    ) external onlyValidator validProposal(proposalId) nonReentrant {
         Proposal storage proposal = proposals[proposalId];
 
         // Batch validation
         if (proposal.creator != msg.sender)
             revert Coordinator__MustBeProposalCreator();
-        if (proposal.executed) revert Coordinator__InvalidProposalNumber();
         if (proposal.votes < _calculateRequiredVotes())
             revert Coordinator__NotEnoughVotes();
 
@@ -264,6 +274,33 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         _updateRound();
     }
 
+    // ============= Cleanup Functions =============
+    /**
+     * @notice Clean up old proposals to save storage costs
+     * @dev Can be called by anyone to incentivize cleanup
+     * @return cleanedCount Number of proposals cleaned up
+     */
+    function cleanupOldProposals() external returns (uint256 cleanedCount) {
+        return _cleanupProposals(CLEANUP_BATCH_SIZE);
+    }
+
+    /**
+     * @notice Force expire a specific proposal that's older than MAX_PROPOSAL_AGE
+     * @param proposalId The proposal to expire
+     */
+    function expireProposal(uint256 proposalId) external {
+        if (!_isProposalExpired(proposalId))
+            revert Coordinator__ProposalTooEarly();
+
+        Proposal storage proposal = proposals[proposalId];
+        if (proposal.creator == address(0))
+            revert Coordinator__InvalidProposalNumber();
+        if (proposal.executed) return; // Already handled
+
+        delete proposals[proposalId];
+        emit ProposalExpired(proposalId);
+    }
+
     // ============= Validator Management =============
     /**
      * @notice Add validator with stake verification
@@ -292,6 +329,59 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     }
 
     // ============= INTERNAL FUNCTIONS =============
+    function _cleanupProposals(
+        uint256 batchSize
+    ) internal returns (uint256 cleanedCount) {
+        uint256 currentProposalId = roundData.nextProposalId;
+        uint256 startId = oldestProposalId;
+        uint256 endId = startId + batchSize;
+
+        if (endId > currentProposalId) {
+            endId = currentProposalId;
+        }
+
+        if (startId >= endId) return 0;
+
+        uint256 cutoffTime = block.timestamp - MAX_PROPOSAL_AGE;
+
+        unchecked {
+            for (uint256 i = startId; i < endId; ++i) {
+                Proposal storage proposal = proposals[i];
+
+                // Skip if proposal doesn't exist
+                if (proposal.creator == address(0)) {
+                    continue;
+                } else if (proposal.createdAt > cutoffTime) {
+                    break;
+                }
+
+                // Clean up executed or expired proposals
+                if (proposal.executed || _isProposalExpired(i)) {
+                    delete proposals[i];
+                    ++cleanedCount;
+                }
+            }
+        }
+
+        // Update oldest proposal pointer
+        oldestProposalId = endId;
+
+        if (cleanedCount > 0) {
+            emit ProposalsCleanedUp(startId, endId - 1, cleanedCount);
+        }
+
+        return cleanedCount;
+    }
+
+    function _isProposalExpired(
+        uint256 proposalId
+    ) internal view returns (bool) {
+        Proposal storage proposal = proposals[proposalId];
+        if (proposal.creator == address(0)) return false;
+
+        return block.timestamp > proposal.createdAt + MAX_PROPOSAL_AGE;
+    }
+
     function _addValidator(address validator) internal {
         if (!i_smartnodesCore.isLockedValidator(validator)) {
             revert Coordinator__NotValidator();
@@ -355,18 +445,11 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     }
 
     function _cleanupExpiredRound() internal {
-        address[] memory vals = validators;
-        uint256 validatorCount = vals.length;
+        _resetValidatorStates();
 
-        unchecked {
-            for (uint256 i = 0; i < validatorCount; ++i) {
-                address validator = vals[i];
-                validatorVote[validator] = 0;
-                validatorToProposal[validator] = 0;
-            }
-        }
+        // Enhanced cleanup: also clean up old proposals during round expiry
+        _cleanupProposals(CLEANUP_BATCH_SIZE / 2); // Use smaller batch during round transitions
 
-        delete currentRoundValidators;
         emit ProposalExpired(roundData.currentRoundId);
     }
 
@@ -389,10 +472,10 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         unchecked {
             for (uint256 i = 0; i < validatorCount; ++i) {
-                validatorVote[vals[i]] = 0;
+                delete validatorVote[vals[i]];
             }
             for (uint256 i = 0; i < selectedCount; ++i) {
-                validatorToProposal[currentVals[i]] = 0;
+                delete validatorToProposal[currentVals[i]];
             }
         }
     }
@@ -515,6 +598,12 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         return _isCurrentRoundExpired();
     }
 
+    function isProposalExpired(
+        uint256 proposalId
+    ) external view returns (bool) {
+        return _isProposalExpired(proposalId);
+    }
+
     function getRequiredApprovals() external view returns (uint256) {
         return _calculateRequiredVotes();
     }
@@ -545,6 +634,14 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         uint256 proposalId
     ) external view returns (Proposal memory) {
         return proposals[proposalId];
+    }
+
+    function getCleanupInfo()
+        external
+        view
+        returns (uint256 oldestId, uint256 nextId, uint256 maxAge)
+    {
+        return (oldestProposalId, roundData.nextProposalId, MAX_PROPOSAL_AGE);
     }
 
     function getState()

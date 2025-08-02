@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {ISmartnodesCoordinator} from "./ISmartnodesCoordinator.sol";
+
 /**
  * @title ISmartnodesCore Interface
  * @dev Interface for the SmartnodesCore contract
@@ -27,6 +29,8 @@ interface ISmartnodesCore {
     }
 
     function addNetwork(string calldata _name) external;
+
+    function removeNetwork(uint8 _networkId) external;
 
     function createValidator(bytes32 publicKeyHash) external;
 
@@ -61,4 +65,6 @@ interface ISmartnodesCore {
         );
 
     function isLockedValidator(address validator) external view returns (bool);
+
+    function getCoordinator() external view returns (ISmartnodesCoordinator);
 }

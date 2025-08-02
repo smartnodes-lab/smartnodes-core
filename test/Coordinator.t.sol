@@ -14,10 +14,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         // Coordinator-specific setup
         addTestNetwork("Tensorlink");
         createTestValidator(validator1, VALIDATOR1_PUBKEY);
-
-        // Add validator to coordinator
-        vm.prank(validator1);
-        coordinator.addValidator(validator1);
     }
 
     function testCreateProposal() public {
@@ -172,9 +168,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
     function testAddValidator() public {
         // Create a new validator in core first
         createTestValidator(validator2, VALIDATOR2_PUBKEY);
-
-        vm.prank(validator2);
-        coordinator.addValidator(validator2);
 
         assertTrue(coordinator.isValidator(validator2));
         assertEq(coordinator.getValidatorCount(), 2); // 1 initial + 1 new

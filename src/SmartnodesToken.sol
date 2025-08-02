@@ -577,6 +577,11 @@ contract SmartnodesToken is ERC20, Ownable {
         return s_totalClaimed[_user];
     }
 
+    function getTotalUnclaimed() external view returns (uint128, uint128) {
+        PaymentAmounts storage totalUnclaimed = s_totalUnclaimed;
+        return (totalUnclaimed.sno, totalUnclaimed.eth);
+    }
+
     /**
      * @dev Get escrowed payments for a specific address
      */
