@@ -37,6 +37,22 @@ contract SmartnodesToken is ERC20, Ownable {
         uint128 eth;
     }
 
+    struct SupplyBreakdown {
+        uint256 totalSupply;
+        uint256 circulating;
+        uint256 locked;
+        uint256 unclaimed;
+        uint256 escrowed;
+    }
+
+    struct EthBreakdown {
+        uint256 totalContractEth;
+        uint256 unclaimedEth;
+        uint256 daoEth;
+        uint256 escrowedEth;
+        uint256 availableEth;
+    }
+
     /** Constants */
     uint8 private constant VALIDATOR_REWARD_PERCENTAGE = 10;
     uint8 private constant DAO_REWARD_PERCENTAGE = 5;
@@ -550,7 +566,181 @@ contract SmartnodesToken is ERC20, Ownable {
         emissionRate = _emissionForEra(era);
     }
 
+    // =============== Helper Functions for Supply Calculation ===============
+
+    /**
+     * @notice Calculate total locked SNO tokens across all users
+     * @return totalLocked The total amount of SNO tokens currently locked
+     */
+    function _calculateTotalLocked()
+        internal
+        view
+        returns (uint256 totalLocked)
+    {
+        // Note: This is a simplified approach. For a production contract,
+        // you might want to maintain a running total to avoid gas issues
+        // if you have many locked positions. This would require tracking
+        // total locked amounts in state variables.
+
+        // Since we can't efficiently iterate over all locked positions,
+        // we'll need to track this in state variables during lock/unlock operations
+        // For now, return the contract's token balance minus escrowed amounts
+        uint256 contractBalance = balanceOf(address(this));
+        uint256 totalEscrowed = _calculateTotalEscrowedTokens();
+
+        // Contract balance should equal locked tokens + escrowed tokens
+        if (contractBalance >= totalEscrowed) {
+            totalLocked = contractBalance - totalEscrowed;
+        }
+    }
+
+    /**
+     * @notice Calculate total escrowed SNO tokens across all users
+     * @return totalEscrowed The total amount of SNO tokens currently escrowed
+     */
+    function _calculateTotalEscrowedTokens()
+        internal
+        view
+        returns (uint256 totalEscrowed)
+    {
+        // Note: This is also simplified. In production, you'd want to track this
+        // in a state variable and update it during escrow/release operations
+        // to avoid potential gas issues with large numbers of escrowed positions
+
+        // For a more gas-efficient approach, add a state variable:
+        // uint256 public s_totalEscrowedTokens;
+        // and update it in escrowPayment() and releaseEscrowedPayment()
+
+        // This is a placeholder - you'd need to implement proper tracking
+        return 0; // Placeholder - implement proper tracking
+    }
+
+    /**
+     * @notice Calculate total escrowed ETH across all users
+     * @return totalEscrowedEth The total amount of ETH currently escrowed
+     */
+    function _calculateTotalEscrowedEth()
+        internal
+        view
+        returns (uint256 totalEscrowedEth)
+    {
+        // Similar to tokens - implement proper state tracking for production
+        return 0; // Placeholder - implement proper tracking
+    }
+
     // =============== View Functions ===============
+
+    /**
+     * @notice Get comprehensive breakdown of SNO token supply
+     * @return breakdown Struct containing all supply metrics
+     */
+    function getSupplyBreakdown()
+        external
+        view
+        returns (SupplyBreakdown memory breakdown)
+    {
+        uint256 total = totalSupply();
+        uint256 locked = _calculateTotalLocked();
+        uint256 unclaimed = s_totalUnclaimed.sno;
+        uint256 escrowed = _calculateTotalEscrowedTokens();
+
+        breakdown = SupplyBreakdown({
+            totalSupply: total,
+            circulating: total - locked, // Circulating = not locked
+            locked: locked,
+            unclaimed: unclaimed, // These will be minted when claimed
+            escrowed: escrowed
+        });
+    }
+
+    /**
+     * @notice Get comprehensive breakdown of ETH in the contract
+     * @return breakdown Struct containing all ETH metrics
+     */
+    function getEthBreakdown()
+        external
+        view
+        returns (EthBreakdown memory breakdown)
+    {
+        uint256 contractEth = address(this).balance;
+        uint256 unclaimed = s_totalUnclaimed.eth;
+        uint256 daoEth = s_daoFunds.eth;
+        uint256 escrowed = _calculateTotalEscrowedEth();
+
+        // Available ETH = total - (unclaimed + dao + escrowed)
+        uint256 available = contractEth;
+        if (available >= unclaimed + daoEth + escrowed) {
+            available = available - unclaimed - daoEth - escrowed;
+        } else {
+            available = 0;
+        }
+
+        breakdown = EthBreakdown({
+            totalContractEth: contractEth,
+            unclaimedEth: unclaimed,
+            daoEth: daoEth,
+            escrowedEth: escrowed,
+            availableEth: available
+        });
+    }
+
+    /**
+     * @notice Get simple supply metrics (legacy function - kept for compatibility)
+     * @return totalSupply_ Total supply of SNO tokens
+     * @return totalLocked Total locked SNO tokens
+     * @return totalUnclaimed Total unclaimed SNO tokens (will be minted when claimed)
+     */
+    function getSupply()
+        external
+        view
+        returns (
+            uint256 totalSupply_,
+            uint256 totalLocked,
+            uint256 totalUnclaimed
+        )
+    {
+        totalSupply_ = totalSupply();
+        totalLocked = _calculateTotalLocked();
+        totalUnclaimed = s_totalUnclaimed.sno;
+    }
+
+    /**
+     * @notice Get total unclaimed rewards (both SNO and ETH)
+     * @return snoUnclaimed Total unclaimed SNO tokens
+     * @return ethUnclaimed Total unclaimed ETH
+     */
+    function getTotalUnclaimed()
+        external
+        view
+        returns (uint128 snoUnclaimed, uint128 ethUnclaimed)
+    {
+        return (s_totalUnclaimed.sno, s_totalUnclaimed.eth);
+    }
+
+    /**
+     * @notice Get DAO funds (both SNO and ETH)
+     * @return snoFunds SNO tokens allocated to DAO
+     * @return ethFunds ETH allocated to DAO
+     */
+    function getDaoFunds()
+        external
+        view
+        returns (uint128 snoFunds, uint128 ethFunds)
+    {
+        return (s_daoFunds.sno, s_daoFunds.eth);
+    }
+
+    /**
+     * @notice Get contract's ETH balance
+     * @return ethBalance Total ETH held by the contract
+     */
+    function getContractEthBalance()
+        external
+        view
+        returns (uint256 ethBalance)
+    {
+        return address(this).balance;
+    }
 
     /**
      * @dev Get the current SmartnodesCore contract address
@@ -577,11 +767,6 @@ contract SmartnodesToken is ERC20, Ownable {
         return s_totalClaimed[_user];
     }
 
-    function getTotalUnclaimed() external view returns (uint128, uint128) {
-        PaymentAmounts storage totalUnclaimed = s_totalUnclaimed;
-        return (totalUnclaimed.sno, totalUnclaimed.eth);
-    }
-
     /**
      * @dev Get escrowed payments for a specific address
      */
@@ -589,5 +774,34 @@ contract SmartnodesToken is ERC20, Ownable {
         address _user
     ) external view returns (PaymentAmounts memory) {
         return s_escrowedPayments[_user];
+    }
+
+    /**
+     * @dev Get locked token information for a specific address
+     */
+    function getLockedTokens(
+        address _user
+    ) external view returns (LockedTokens memory) {
+        return s_lockedTokens[_user];
+    }
+
+    /**
+     * @dev Check if a user has tokens locked
+     */
+    function isUserLocked(address _user) external view returns (bool) {
+        return
+            s_lockedTokens[_user].locked ||
+            s_lockedTokens[_user].unlockTime > 0;
+    }
+
+    /**
+     * @dev Get the lock amounts for validators and users
+     */
+    function getLockAmounts()
+        external
+        view
+        returns (uint256 validatorAmount, uint256 userAmount)
+    {
+        return (s_validatorLockAmount, s_userLockAmount);
     }
 }

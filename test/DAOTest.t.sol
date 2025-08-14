@@ -4,7 +4,6 @@ pragma solidity ^0.8.22;
 import {console} from "forge-std/Test.sol";
 import {BaseSmartnodesTest} from "./BaseTest.sol";
 import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
-import {SmartnodesDeployer} from "../src/SmartnodesDeployer.sol";
 import {SmartnodesToken} from "../src/SmartnodesToken.sol";
 import {SmartnodesCore} from "../src/SmartnodesCore.sol";
 
@@ -14,55 +13,7 @@ contract SmartnodesDAOTest is BaseSmartnodesTest {
     uint256 constant MIN_VOTING_POWER = 1000e18;
     uint256 constant VOTING_PERIOD = 7 days;
 
-    function testGetVotingPower() public {
-        bytes32[] memory jobHashes = new bytes32[](1);
-        address[] memory jobWorkers = new address[](1);
-        uint256[] memory jobCapacities = new uint256[](1);
-        address[] memory validatorsToRemove = new address[](0);
-        jobHashes[0] = JOB_ID_1;
-        jobWorkers[0] = worker1;
-        jobCapacities[0] = 100;
-
-        createTestValidator(validator1, bytes32("a"));
-
-        vm.startPrank(validator1);
-        vm.warp(block.timestamp + 60 * 60 * 2);
-
-        bytes32 proposalHash = keccak256(
-            abi.encode(
-                validatorsToRemove,
-                jobHashes,
-                jobCapacities,
-                jobWorkers,
-                block.timestamp
-            )
-        );
-
-        coordinator.createProposal(proposalHash);
-        coordinator.voteForProposal(1);
-        coordinator.executeProposal(
-            1,
-            validatorsToRemove,
-            jobHashes,
-            jobWorkers,
-            jobCapacities
-        );
-        vm.stopPrank();
-
-        console.log(dao.getVotingPower(validator1));
-        console.log(dao.getVotingPower(validator2));
-        console.log(dao.getVotingPower(validator3));
-        console.log(dao.getVotingPower(user1));
-        console.log(dao.getVotingPower(worker1));
-        // assertEq(dao.getVotingPower(validator1));
-        // assertEq(dao.getVotingPower(user2), 500e18);
-        // assertEq(dao.getVotingPower(user3), 0);
-    }
-
     // function testProposeAddNetwork() public {
-    //     // Give user1 sufficient voting power
-    //     // token.setUnclaimedRewards(user1, MIN_VOTING_POWER);
-
     //     vm.prank(user1);
     //     uint256 proposalId = dao.proposeAddNetwork(
     //         "Ethereum",

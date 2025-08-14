@@ -65,7 +65,7 @@ contract SmartnodesCore {
     /** State Variables */
     ISmartnodesCoordinator private validatorContract;
 
-    uint256 public jobCounter;
+    uint256 internal jobCounter;
     uint8 public networkCounter;
 
     mapping(address => Node) public validators;
@@ -311,6 +311,12 @@ contract SmartnodesCore {
     }
 
     // ============= VIEW FUNCTIONS =============
+    function getValidatorInfo(
+        address _validator
+    ) external view returns (bool, bytes32) {
+        Node storage validator = validators[_validator];
+        return (validator.locked, validator.publicKeyHash);
+    }
 
     function isLockedValidator(address validator) external view returns (bool) {
         return (validators[validator].locked);
@@ -318,5 +324,9 @@ contract SmartnodesCore {
 
     function getCoordinator() external view returns (address) {
         return (address(validatorContract));
+    }
+
+    function getJobCount() external view returns (uint256) {
+        return (jobCounter);
     }
 }

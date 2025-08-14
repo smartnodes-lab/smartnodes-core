@@ -21,13 +21,12 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         // Fast forward time to expire the round and allow proposal creation
         vm.warp(block.timestamp + updateTime + 1);
 
-        uint256 proposalId = createBasicProposal(validator1);
+        uint8 proposalId = createBasicProposal(validator1);
 
         SmartnodesCoordinator.Proposal memory proposal = coordinator
             .getProposal(proposalId);
         assertEq(proposal.creator, validator1);
-        assertEq(proposal.votes, 0);
-        assertFalse(proposal.executed);
+        assertEq(proposal.votes, 1);
     }
 
     function testVoteForProposal() public {
@@ -36,15 +35,17 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         // Fast forward time to expire the round and allow proposal creation
         vm.warp(block.timestamp + updateTime + 1);
 
-        uint256 proposalId = createBasicProposal(validator1);
+        uint8 proposalId = createBasicProposal(validator1);
+
+        createTestValidator(validator2, VALIDATOR2_PUBKEY);
 
         // Vote for proposal
-        vm.prank(validator1);
+        vm.prank(validator2);
         coordinator.voteForProposal(proposalId);
 
         SmartnodesCoordinator.Proposal memory proposal = coordinator
             .getProposal(proposalId);
-        assertEq(proposal.votes, 1);
+        assertEq(proposal.votes, 2);
     }
 
     function testCannotVoteTwice() public {
@@ -53,11 +54,7 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         // Fast forward time to expire the round and allow proposal creation
         vm.warp(block.timestamp + updateTime + 1);
 
-        uint256 proposalId = createBasicProposal(validator1);
-
-        // First vote
-        vm.prank(validator1);
-        coordinator.voteForProposal(proposalId);
+        uint8 proposalId = createBasicProposal(validator1);
 
         // Second vote should fail
         vm.expectRevert(
@@ -73,11 +70,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         // Fast forward time to expire the round and allow proposal creation
         vm.warp(block.timestamp + updateTime + 1);
 
-        uint256 proposalId = createBasicProposal(validator1);
-
-        vm.prank(validator1);
-        coordinator.voteForProposal(proposalId);
-
         // Execute proposal
         bytes32[] memory jobHashes = new bytes32[](1);
         jobHashes[0] = JOB_ID_1;
@@ -90,18 +82,27 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         address[] memory validatorsToRemove = new address[](0);
 
+        bytes32 proposalHash = keccak256(
+            abi.encode(validatorsToRemove, jobHashes, jobCapacities, jobWorkers)
+        );
+
+        vm.prank(validator1);
+        coordinator.createProposal(proposalHash);
+
+        SmartnodesCoordinator.Proposal memory proposal = coordinator
+            .getProposal(1);
+
+        console.log("Proposal creator:", proposal.creator);
+        console.log("Proposal votes:", proposal.votes);
+
         vm.prank(validator1);
         coordinator.executeProposal(
-            proposalId,
+            1,
             validatorsToRemove,
             jobHashes,
             jobWorkers,
             jobCapacities
         );
-
-        SmartnodesCoordinator.Proposal memory proposal = coordinator
-            .getProposal(proposalId);
-        assertTrue(proposal.executed);
     }
 
     function testExecuteProposalMaximum() public {
@@ -132,23 +133,13 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         }
 
         bytes32 proposalHash = keccak256(
-            abi.encode(
-                validatorsToRemove,
-                jobHashes,
-                jobCapacities,
-                jobWorkers,
-                block.timestamp
-            )
+            abi.encode(validatorsToRemove, jobHashes, jobCapacities, jobWorkers)
         );
 
         vm.prank(validator1);
         coordinator.createProposal(proposalHash);
 
-        (, uint128 nextProposalId) = coordinator.roundData();
-        uint256 proposalId = nextProposalId - 1;
-
-        vm.prank(validator1);
-        coordinator.voteForProposal(proposalId);
+        uint8 proposalId = 1;
 
         // Execute the proposal
         vm.prank(validator1);
@@ -159,10 +150,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             jobWorkers,
             jobCapacities
         );
-
-        SmartnodesCoordinator.Proposal memory proposal = coordinator
-            .getProposal(proposalId);
-        assertTrue(proposal.executed);
     }
 
     function testAddValidator() public {
