@@ -31,7 +31,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     ISmartnodesCore private immutable i_smartnodesCore;
     uint8 private immutable i_requiredApprovalsPercentage;
 
-    // Pack time-related variables
+    // Packed time-related variables
     struct TimeConfig {
         uint128 updateTime;
         uint128 lastExecutionTime;
@@ -53,10 +53,9 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     address[] public validators;
     address[] public currentRoundValidators;
     Proposal[] public currentProposals;
-
     mapping(address => bool) public isValidator;
-    mapping(address => uint256) public validatorVote; // Changed to uint256 for proposal index
-    mapping(uint256 => uint256) private proposalReadyBitmap;
+    mapping(address => uint256) public validatorVote;
+    mapping(address => uint8) public hasSubmittedProposal;
 
     // ============= Events ==============
     event ProposalCreated(
@@ -143,6 +142,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     function createProposal(
         bytes32 proposalHash
     ) external onlyEligibleValidator nonReentrant {
+        address sender = msg.sender;
         TimeConfig memory tc = timeConfig;
 
         // Allow proposals only after 'updateTime' has passed since last executed proposal
@@ -155,7 +155,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         uint256 proposalLength = currentProposals.length;
 
         for (uint8 i = 0; i < proposalLength; i++) {
-            if (currentProposals[i].creator == msg.sender) {
+            if (currentProposals[i].creator == sender) {
                 hasExistingProposal = true;
                 break;
             }
@@ -165,12 +165,12 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             revert Coordinator__AlreadySubmittedProposal();
         }
 
-        uint8 proposalNum = uint8(currentProposals.length) + 1;
+        uint8 proposalNum = uint8(currentProposals.length) + 1; // +1 to distinguish from 0 (no vote)
 
         // Create new proposal
         currentProposals.push(
             Proposal({
-                creator: msg.sender,
+                creator: sender,
                 proposalNum: proposalNum,
                 votes: 1, // Creator automatically votes for their own proposal
                 proposalHash: proposalHash
@@ -178,9 +178,9 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         );
 
         // Record creator's vote
-        validatorVote[msg.sender] = proposalNum + 1; // +1 to distinguish from 0 (no vote)
-
-        emit ProposalCreated(proposalNum, proposalHash, msg.sender);
+        validatorVote[sender] = proposalNum;
+        hasSubmittedProposal[sender] = proposalNum;
+        emit ProposalCreated(proposalNum, proposalHash, sender);
     }
 
     /**
@@ -235,6 +235,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         if (proposal.creator != msg.sender) {
             revert Coordinator__MustBeProposalCreator();
         }
+
         if (proposal.votes < _calculateRequiredVotes()) {
             revert Coordinator__NotEnoughVotes();
         }
@@ -378,7 +379,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         _resetValidatorStates();
         _selectNewRoundValidators();
         delete currentProposals; // Clear proposals for new round
-
         timeConfig.lastExecutionTime = uint128(block.timestamp);
         nextProposalId++;
     }
@@ -389,7 +389,9 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         unchecked {
             for (uint256 i = 0; i < validatorCount; ++i) {
-                delete validatorVote[vals[i]];
+                address val = vals[i];
+                delete validatorVote[val];
+                delete hasSubmittedProposal[val];
             }
         }
     }
@@ -454,8 +456,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         unchecked {
             for (uint256 i = 0; i < validatorCount; ++i) {
                 address validator = vals[i];
-                if (validatorVote[validator] == proposalId + 1) {
-                    // +1 offset
+                if (validatorVote[validator] == proposalId) {
                     approvedValidators[approvedCount++] = validator;
                 }
             }
@@ -506,6 +507,16 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     }
 
     // ============= View Functions =============
+    function isProposalReady(uint8 proposalId) external view returns (bool) {
+        if (proposalId == 0 || proposalId > currentProposals.length) {
+            revert Coordinator__InvalidProposalNumber();
+        }
+
+        Proposal storage proposal = currentProposals[proposalId - 1];
+
+        return (proposal.votes >= _calculateRequiredVotes());
+    }
+
     function isRoundExpired() external view returns (bool) {
         return _isCurrentRoundExpired();
     }
