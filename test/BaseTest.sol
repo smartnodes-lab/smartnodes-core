@@ -30,6 +30,7 @@ abstract contract BaseSmartnodesTest is Test {
     address public worker2 = makeAddr("worker2");
     address public worker3 = makeAddr("worker3");
     address[] public genesisNodes;
+    address[] public activeNodes;
 
     // Test constants
     bytes32 constant USER1_PUBKEY = keccak256("user1_pubkey");
@@ -55,11 +56,12 @@ abstract contract BaseSmartnodesTest is Test {
 
         token = new SmartnodesToken(genesisNodes);
         core = new SmartnodesCore(address(token));
+
         coordinator = new SmartnodesCoordinator(
             3600,
             66,
             address(core),
-            genesisNodes
+            activeNodes
         );
         dao = new SmartnodesDAO(address(token), address(core));
 
@@ -73,10 +75,9 @@ abstract contract BaseSmartnodesTest is Test {
     }
 
     function _setupInitialState() internal virtual {
-        // createTestValidator(validator1, VALIDATOR1_PUBKEY);
-        // createTestValidator(validator2, VALIDATOR2_PUBKEY);
-        // vm.prank(validator2);
-        // core.createValidator(VALIDATOR2_PUBKEY);
+        vm.prank(validator1);
+        core.createValidator(VALIDATOR1_PUBKEY);
+        coordinator.addValidator(validator1);
     }
 
     // ============= Helper Functions =============
@@ -87,12 +88,6 @@ abstract contract BaseSmartnodesTest is Test {
         vm.prank(deployerAddr);
         core.addNetwork(networkName);
         return core.networkCounter();
-    }
-
-    function createTestValidator(address validator, bytes32 pubkey) internal {
-        vm.prank(validator);
-        core.createValidator(pubkey);
-        coordinator.addValidator(validator);
     }
 
     function createTestUser(address user, bytes32 pubkey) internal {
@@ -170,23 +165,14 @@ abstract contract BaseSmartnodesTest is Test {
         jobWorkers[0] = worker1;
         jobCapacities[0] = 100;
 
-        createTestValidator(validator1, bytes32("a"));
-
         vm.startPrank(validator1);
         vm.warp(block.timestamp + 60 * 60 * 2);
 
         bytes32 proposalHash = keccak256(
-            abi.encode(
-                validatorsToRemove,
-                jobHashes,
-                jobCapacities,
-                jobWorkers,
-                block.timestamp
-            )
+            abi.encode(validatorsToRemove, jobHashes, jobCapacities, jobWorkers)
         );
 
         coordinator.createProposal(proposalHash);
-        coordinator.voteForProposal(1);
         coordinator.executeProposal(
             1,
             validatorsToRemove,

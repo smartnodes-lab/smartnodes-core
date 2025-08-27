@@ -12,12 +12,14 @@ import {BaseSmartnodesTest} from "./BaseTest.sol";
 contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
     function _setupInitialState() internal override {
         // Coordinator-specific setup
+        BaseSmartnodesTest._setupInitialState();
+        executeProposalRound();
         addTestNetwork("Tensorlink");
-        createTestValidator(validator1, VALIDATOR1_PUBKEY);
     }
 
     function testCreateProposal() public {
         (uint128 updateTime, ) = coordinator.timeConfig();
+
         // Fast forward time to expire the round and allow proposal creation
         vm.warp(block.timestamp + updateTime + 1);
 
@@ -37,7 +39,9 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         uint8 proposalId = createBasicProposal(validator1);
 
-        createTestValidator(validator2, VALIDATOR2_PUBKEY);
+        vm.prank(validator2);
+        core.createValidator(VALIDATOR2_PUBKEY);
+        coordinator.addValidator(validator2);
 
         // Vote for proposal
         vm.prank(validator2);
@@ -154,7 +158,9 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
     function testAddValidator() public {
         // Create a new validator in core first
-        createTestValidator(validator2, VALIDATOR2_PUBKEY);
+        vm.prank(validator2);
+        core.createValidator(VALIDATOR2_PUBKEY);
+        coordinator.addValidator(validator2);
 
         assertTrue(coordinator.isValidator(validator2));
         assertEq(coordinator.getValidatorCount(), 2); // 1 initial + 1 new

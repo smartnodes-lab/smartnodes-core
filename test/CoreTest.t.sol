@@ -59,9 +59,7 @@ contract SmartnodesCoreTest is BaseSmartnodesTest {
 
     // ============= Node Management Tests =============
 
-    function testCreateValidator() public {
-        createTestValidator(validator1, VALIDATOR1_PUBKEY);
-
+    function testCreateValidator() public view {
         (bytes32 pubKeyHash, uint8 reputation, bool locked, bool exists) = core
             .validators(validator1);
         assertEq(pubKeyHash, VALIDATOR1_PUBKEY);
@@ -71,8 +69,6 @@ contract SmartnodesCoreTest is BaseSmartnodesTest {
     }
 
     function testCreateValidatorDuplicate() public {
-        createTestValidator(validator1, VALIDATOR1_PUBKEY);
-
         vm.expectRevert(SmartnodesCore.Core__NodeExists.selector);
         vm.prank(validator1);
         core.createValidator(VALIDATOR1_PUBKEY);

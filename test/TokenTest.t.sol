@@ -21,10 +21,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
     function _setupInitialState() internal override {
         // Token-specific setup
         addTestNetwork("Tensorlink");
-
-        // Create validators (but don't lock their tokens yet)
-        createTestValidator(validator1, VALIDATOR1_PUBKEY);
-        // createTestValidator(validator2, VALIDATOR2_PUBKEY);
+        BaseSmartnodesTest._setupInitialState();
         createTestUser(user1, USER1_PUBKEY);
 
         // Ensure validators have enough tokens and ETH
@@ -125,7 +122,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
     function testCannotLockAlreadyLockedTokens() public {
         vm.startPrank(address(core));
         vm.expectRevert(SmartnodesToken.Token__AlreadyLocked.selector);
-        token.lockTokens(validator1, true); // validator1 is already locked from setup
+        token.lockTokens(validator1, true);
         vm.stopPrank();
     }
 

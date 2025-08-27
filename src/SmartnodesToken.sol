@@ -188,6 +188,7 @@ contract SmartnodesToken is ERC20, Ownable {
         }
 
         LockedTokens storage locked = s_lockedTokens[_user];
+
         if (!locked.locked) {
             // If locked is false, the tokens are either already unlocking or were never locked
             if (locked.unlockTime == 0) {

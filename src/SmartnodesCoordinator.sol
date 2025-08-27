@@ -126,7 +126,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         // Initialize validators from genesis nodes
         for (uint256 i = 0; i < _genesisNodes.length; i++) {
             if (_genesisNodes[i] != address(0)) {
-                // _addValidator(_genesisNodes[i]);
+                _addValidator(_genesisNodes[i]);
             }
         }
 

@@ -9,19 +9,26 @@ import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
 
 contract Deploy is Script {
     address[] genesis;
+    address[] initialActiveNodes;
 
     function run() external {
+        initialActiveNodes.push(msg.sender);
         genesis.push(msg.sender);
+        genesis.push(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266);
 
         vm.startBroadcast();
 
         SmartnodesToken token = new SmartnodesToken(genesis);
         SmartnodesCore core = new SmartnodesCore(address(token));
+
+        bytes32 publicKeyHash = vm.envBytes32("PUBLIC_KEY_HASH");
+        core.createValidator(publicKeyHash);
+
         SmartnodesCoordinator coordinator = new SmartnodesCoordinator(
             3600,
             66,
             address(core),
-            genesis
+            initialActiveNodes
         );
         SmartnodesDAO dao = new SmartnodesDAO(address(token), address(core));
 
