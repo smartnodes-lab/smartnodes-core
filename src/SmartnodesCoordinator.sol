@@ -46,7 +46,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         bytes32 proposalHash;
     }
 
-    uint256 public requiredValidators;
     uint256 public nextProposalId;
 
     // Validator management
@@ -56,6 +55,11 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     mapping(address => bool) public isValidator;
     mapping(address => uint256) public validatorVote;
     mapping(address => uint8) public hasSubmittedProposal;
+    mapping(address => uint256) public validatorLastActiveRound; // Track validator activity
+
+    // Enhanced round management
+    uint256 public currentRoundNumber;
+    uint256 private roundSeed; // Used for deterministic but unpredictable validator selection
 
     // ============= Events ==============
     event ProposalCreated(
@@ -70,6 +74,10 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     event ValidatorAdded(address indexed validator);
     event ValidatorRemoved(address indexed validator);
     event ConfigUpdated(uint256 updateTime);
+    event NewRoundStarted(
+        uint256 indexed roundNumber,
+        address[] selectedValidators
+    );
 
     // ============= Modifiers ==============
     modifier onlyValidator() {
@@ -130,8 +138,16 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             }
         }
 
-        currentRoundValidators = _genesisNodes;
-        requiredValidators = 1; // Set initial required validators
+        // Initialize round management
+        currentRoundNumber = 1;
+        roundSeed = uint256(
+            keccak256(
+                abi.encode(block.timestamp, block.prevrandao, _genesisNodes)
+            )
+        );
+
+        // Select initial round validators
+        _selectNewRoundValidators();
         nextProposalId = 1;
     }
 
@@ -165,21 +181,22 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             revert Coordinator__AlreadySubmittedProposal();
         }
 
-        uint8 proposalNum = uint8(currentProposals.length) + 1; // +1 to distinguish from 0 (no vote)
+        uint8 proposalNum = uint8(proposalLength) + 1; // +1 to distinguish from 0 (no proposal)
 
         // Create new proposal
         currentProposals.push(
             Proposal({
                 creator: sender,
                 proposalNum: proposalNum,
-                votes: 1, // Creator automatically votes for their own proposal
+                votes: 0,
                 proposalHash: proposalHash
             })
         );
 
-        // Record creator's vote
-        validatorVote[sender] = proposalNum;
+        // mark as active
         hasSubmittedProposal[sender] = proposalNum;
+        validatorLastActiveRound[sender] = currentRoundNumber;
+
         emit ProposalCreated(proposalNum, proposalHash, sender);
     }
 
@@ -194,36 +211,31 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             revert Coordinator__InvalidProposalNumber();
         }
 
-        if (!_isCurrentRoundExpired() && validatorVote[msg.sender] != 0) {
+        if (validatorVote[msg.sender] != 0) {
             revert Coordinator__AlreadyVoted();
         }
 
-        // Auto-add validator if eligible and not expired round
-        if (!isValidator[msg.sender] && !_isCurrentRoundExpired()) {
-            _tryAddValidator(msg.sender);
-        }
-
-        Proposal storage proposal = currentProposals[proposalId - 1]; // (ie proposal 1 = 0th index)
+        Proposal storage proposal = currentProposals[proposalId - 1];
         validatorVote[msg.sender] = proposalId;
-
-        // Increment votes
+        validatorLastActiveRound[msg.sender] = currentRoundNumber; // Mark as active
         proposal.votes++;
     }
 
     /**
      * @notice Execute a proposal with comprehensive validation if enough votes are received
      * @param proposalId current round proposal ID
+     * @param totalCapacity total capacity for each worker measured in resources/time (ie GB/hr)
      * @param validatorsToRemove any inactive validators that were not found on P2P
      * @param jobHashes job IDs to be completed
-     * @param jobWorkers worker addresses associated with completed jobs
-     * @param jobCapacities job capacity for each worker measured in resources/time (ie GB/hr)
      */
     function executeProposal(
         uint8 proposalId,
+        bytes32 merkleRoot,
+        uint256 totalCapacity,
         address[] calldata validatorsToRemove,
         bytes32[] calldata jobHashes,
-        address[] calldata jobWorkers,
-        uint256[] calldata jobCapacities
+        address[] calldata workers,
+        uint256[] calldata capacities
     ) external onlyValidator nonReentrant {
         if (proposalId == 0 || proposalId > currentProposals.length) {
             revert Coordinator__InvalidProposalNumber();
@@ -231,54 +243,64 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         Proposal storage proposal = currentProposals[proposalId - 1];
 
-        // Batch validation
-        if (proposal.creator != msg.sender) {
+        // Cache frequently accessed storage variables
+        address creator = proposal.creator;
+        uint96 votes = proposal.votes;
+        bytes32 storedHash = proposal.proposalHash;
+
+        // Batch validation with cached values
+        if (creator != msg.sender) {
             revert Coordinator__MustBeProposalCreator();
         }
-
-        if (proposal.votes < _calculateRequiredVotes()) {
+        if (votes < _calculateRequiredVotes()) {
             revert Coordinator__NotEnoughVotes();
         }
 
         // Verify proposal data integrity
         bytes32 computedHash = _computeProposalHash(
+            proposalId,
+            merkleRoot,
             validatorsToRemove,
             jobHashes,
-            jobCapacities,
-            jobWorkers
+            workers,
+            capacities
         );
-        if (computedHash != proposal.proposalHash) {
+
+        if (computedHash != storedHash) {
             revert Coordinator__ProposalDataMismatch();
         }
 
-        // Batch validator removal
+        // Mark executor as active
+        validatorLastActiveRound[msg.sender] = currentRoundNumber;
+
+        // Optimized batch validator removal
         if (validatorsToRemove.length > 0) {
-            _removeValidatorsBatch(validatorsToRemove);
+            _removeValidatorsBatchOptimized(validatorsToRemove);
         }
 
-        // Build approved validators list
+        // Build approved validators list with pre-sized array
         address[] memory approvedValidators = _buildApprovedValidatorsList(
             proposalId
         );
 
-        // Single external call to core contract
+        emit ProposalExecuted(proposalId, storedHash);
+        _updateRound();
+
+        // Update core contract
         i_smartnodesCore.updateContract(
             jobHashes,
-            approvedValidators,
-            jobWorkers,
-            jobCapacities
+            merkleRoot,
+            totalCapacity,
+            approvedValidators
         );
-
-        emit ProposalExecuted(proposalId, proposal.proposalHash);
-        _updateRound();
     }
 
     // ============= Validator Management =============
     /**
      * @notice Add validator with stake verification
      */
-    function addValidator(address validator) external {
-        _addValidator(validator);
+    function addValidator() external {
+        _addValidator(msg.sender);
     }
 
     /**
@@ -312,18 +334,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         validators.push(validator);
         isValidator[validator] = true;
+        validatorLastActiveRound[validator] = currentRoundNumber; // Mark as active from start
         emit ValidatorAdded(validator);
-    }
-
-    function _tryAddValidator(address validator) internal {
-        if (
-            !isValidator[validator] &&
-            i_smartnodesCore.isLockedValidator(validator)
-        ) {
-            validators.push(validator);
-            isValidator[validator] = true;
-            emit ValidatorAdded(validator);
-        }
     }
 
     function _removeValidator(address validator) internal {
@@ -333,8 +345,9 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         isValidator[validator] = false;
         validatorVote[validator] = 0; // Clear vote
+        delete validatorLastActiveRound[validator]; // Clear activity tracking
 
-        // More efficient array removal
+        // Remove from validators array
         address[] storage vals = validators;
         uint256 length = vals.length;
 
@@ -351,23 +364,65 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         emit ValidatorRemoved(validator);
     }
 
-    function _removeValidatorsBatch(
+    function _removeValidatorsBatchOptimized(
         address[] calldata validatorsToRemove
     ) internal {
         uint256 length = validatorsToRemove.length;
-        unchecked {
-            for (uint256 i = 0; i < length; ++i) {
-                if (isValidator[validatorsToRemove[i]]) {
-                    _removeValidator(validatorsToRemove[i]);
+
+        address[] storage vals = validators;
+        uint256 validatorCount = vals.length;
+
+        for (uint256 i = 0; i < length; ) {
+            address validator = validatorsToRemove[i];
+            if (isValidator[validator]) {
+                isValidator[validator] = false;
+                validatorVote[validator] = 0;
+                delete validatorLastActiveRound[validator];
+
+                // Find and remove from array efficiently
+                for (uint256 j = 0; j < validatorCount; ) {
+                    if (vals[j] == validator) {
+                        vals[j] = vals[validatorCount - 1];
+                        vals.pop();
+                        --validatorCount;
+                        break;
+                    }
+                    unchecked {
+                        ++j;
+                    }
                 }
+                emit ValidatorRemoved(validator);
+            }
+            unchecked {
+                ++i;
             }
         }
     }
 
+    /**
+     * @notice Calculate required votes as >50% of total active validators
+     * @dev This ensures true majority consensus
+     */
     function _calculateRequiredVotes() internal view returns (uint256) {
         uint256 validatorCount = validators.length;
         if (validatorCount == 0) return 0;
-        return (validatorCount * i_requiredApprovalsPercentage + 99) / 100;
+
+        // Require >50% (strict majority)
+        return (validatorCount / 2) + 1;
+    }
+
+    /**
+     * @notice Determine how many validators should be selected for the round
+     * @dev Returns 1-5 validators based on total validator count
+     */
+    function _calculateRoundValidatorCount() internal view returns (uint256) {
+        uint256 totalValidators = validators.length;
+
+        if (totalValidators < 2) return 1;
+        if (totalValidators < 4) return 2;
+        if (totalValidators < 8) return 3;
+        if (totalValidators < 15) return 4;
+        return 5; // Max 5 validators for proposal submission
     }
 
     function _cleanupExpiredRound() internal {
@@ -377,6 +432,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     function _updateRound() internal {
         _resetValidatorStates();
+        currentRoundNumber++;
         _selectNewRoundValidators();
         delete currentProposals; // Clear proposals for new round
         timeConfig.lastExecutionTime = uint128(block.timestamp);
@@ -396,6 +452,10 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         }
     }
 
+    /**
+     * @notice Enhanced validator selection with better randomization and activity tracking
+     * @dev Uses Fisher-Yates shuffle algorithm for fair, unbiased selection
+     */
     function _selectNewRoundValidators() internal {
         uint256 validatorCount = validators.length;
 
@@ -404,85 +464,108 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             return;
         }
 
+        uint256 requiredValidators = _calculateRoundValidatorCount();
+
         if (validatorCount < requiredValidators) {
-            revert Coordinator__NotEnoughActiveValidators();
+            // If we don't have enough validators, select all of them
+            requiredValidators = validatorCount;
         }
 
         delete currentRoundValidators;
 
-        // More efficient validator selection using array check
-        uint256 seed = uint256(
-            keccak256(abi.encode(block.timestamp, nextProposalId))
+        // Create a working copy of validators for shuffling
+        address[] memory shuffleArray = new address[](validatorCount);
+        for (uint256 i = 0; i < validatorCount; i++) {
+            shuffleArray[i] = validators[i];
+        }
+
+        // Update seed for this round using multiple entropy sources
+        roundSeed = uint256(
+            keccak256(
+                abi.encode(
+                    roundSeed,
+                    block.timestamp,
+                    block.prevrandao,
+                    currentRoundNumber,
+                    blockhash(block.number - 1)
+                )
+            )
         );
+
+        // Fisher-Yates shuffle to randomize validator order
+        for (uint256 i = validatorCount; i > 1; i--) {
+            roundSeed = uint256(keccak256(abi.encode(roundSeed, i)));
+            uint256 j = roundSeed % i;
+
+            // Swap elements
+            address temp = shuffleArray[j];
+            shuffleArray[j] = shuffleArray[i - 1];
+            shuffleArray[i - 1] = temp;
+        }
+
+        // Prioritize active validators (those who participated in recent rounds)
         uint256 selectedCount = 0;
-        uint256 maxSelections = requiredValidators < validatorCount
-            ? requiredValidators
-            : validatorCount;
+        uint256 inactivityThreshold = currentRoundNumber > 3
+            ? currentRoundNumber - 3
+            : 0;
 
-        uint256 attempts = 0;
-        while (selectedCount < maxSelections && attempts < validatorCount * 3) {
-            // Safety limit
-            seed = uint256(keccak256(abi.encode(seed)));
-            uint256 randIndex = seed % validatorCount;
-            address selectedValidator = validators[randIndex];
-
-            // Check if already selected (linear search through currentRoundValidators)
-            bool alreadySelected = false;
-            for (uint256 j = 0; j < selectedCount; ++j) {
-                if (currentRoundValidators[j] == selectedValidator) {
-                    alreadySelected = true;
-                    break;
-                }
+        // First, try to select active validators
+        for (
+            uint256 i = 0;
+            i < validatorCount && selectedCount < requiredValidators;
+            i++
+        ) {
+            address validator = shuffleArray[i];
+            if (validatorLastActiveRound[validator] > inactivityThreshold) {
+                currentRoundValidators.push(validator);
+                selectedCount++;
             }
-
-            if (!alreadySelected) {
-                currentRoundValidators.push(selectedValidator);
-                ++selectedCount;
-            }
-            ++attempts;
         }
-    }
 
-    function _buildApprovedValidatorsList(
-        uint256 proposalId
-    ) internal view returns (address[] memory) {
-        address[] memory vals = validators;
-        uint256 validatorCount = vals.length;
+        // If we still need more validators, select from remaining ones
+        for (
+            uint256 i = 0;
+            i < validatorCount && selectedCount < requiredValidators;
+            i++
+        ) {
+            address validator = shuffleArray[i];
+            if (validatorLastActiveRound[validator] <= inactivityThreshold) {
+                // Check if not already selected
+                bool alreadySelected = false;
+                for (uint256 j = 0; j < currentRoundValidators.length; j++) {
+                    if (currentRoundValidators[j] == validator) {
+                        alreadySelected = true;
+                        break;
+                    }
+                }
 
-        // Pre-allocate with maximum possible size
-        address[] memory approvedValidators = new address[](validatorCount);
-        uint256 approvedCount = 0;
-
-        unchecked {
-            for (uint256 i = 0; i < validatorCount; ++i) {
-                address validator = vals[i];
-                if (validatorVote[validator] == proposalId) {
-                    approvedValidators[approvedCount++] = validator;
+                if (!alreadySelected) {
+                    currentRoundValidators.push(validator);
+                    selectedCount++;
                 }
             }
         }
 
-        // Resize array to actual count
-        assembly {
-            mstore(approvedValidators, approvedCount)
-        }
-
-        return approvedValidators;
+        emit NewRoundStarted(currentRoundNumber, currentRoundValidators);
     }
 
     function _computeProposalHash(
+        uint8 proposalId,
+        bytes32 merkleRoot,
         address[] calldata validatorsToRemove,
         bytes32[] calldata jobHashes,
-        uint256[] calldata jobCapacities,
-        address[] calldata workers
+        address[] calldata workers,
+        uint256[] calldata capacities
     ) internal pure returns (bytes32) {
         return
             keccak256(
                 abi.encode(
+                    proposalId,
+                    merkleRoot,
                     validatorsToRemove,
                     jobHashes,
-                    jobCapacities,
-                    workers
+                    workers,
+                    capacities
                 )
             );
     }
@@ -501,6 +584,44 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         return false;
     }
 
+    function _buildApprovedValidatorsList(
+        uint256 proposalId
+    ) internal view returns (address[] memory approvedValidators) {
+        address[] memory vals = validators;
+        uint256 validatorCount = vals.length;
+
+        // Count approved validators
+        uint256 approvedCount;
+        for (uint256 i = 0; i < validatorCount; ) {
+            if (validatorVote[vals[i]] == proposalId) {
+                unchecked {
+                    ++approvedCount;
+                }
+            }
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Allocate exact size array
+        approvedValidators = new address[](approvedCount);
+
+        // Populate array
+        uint256 index;
+        for (uint256 i = 0; i < validatorCount; ) {
+            address validator = vals[i];
+            if (validatorVote[validator] == proposalId) {
+                approvedValidators[index] = validator;
+                unchecked {
+                    ++index;
+                }
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     function _isCurrentRoundExpired() internal view returns (bool) {
         TimeConfig memory tc = timeConfig;
         return block.timestamp > tc.lastExecutionTime + (tc.updateTime << 1);
@@ -513,7 +634,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         }
 
         Proposal storage proposal = currentProposals[proposalId - 1];
-
         return (proposal.votes >= _calculateRequiredVotes());
     }
 
@@ -569,7 +689,43 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         )
     {
         TimeConfig memory tc = timeConfig;
-
         return (nextProposalId, tc.lastExecutionTime, currentRoundValidators);
+    }
+
+    /**
+     * @notice Get validator activity information
+     */
+    function getValidatorActivity(
+        address validator
+    )
+        external
+        view
+        returns (uint256 lastActiveRound, bool isCurrentlySelected)
+    {
+        return (
+            validatorLastActiveRound[validator],
+            _isCurrentRoundValidator(validator)
+        );
+    }
+
+    /**
+     * @notice Get current round information
+     */
+    function getCurrentRoundInfo()
+        external
+        view
+        returns (
+            uint256 roundNumber,
+            uint256 selectedValidatorCount,
+            uint256 requiredValidatorCount,
+            uint256 requiredVotes
+        )
+    {
+        return (
+            currentRoundNumber,
+            currentRoundValidators.length,
+            _calculateRoundValidatorCount(),
+            _calculateRequiredVotes()
+        );
     }
 }

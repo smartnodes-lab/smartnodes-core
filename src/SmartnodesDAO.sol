@@ -1,518 +1,278 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {ISmartnodesToken, PaymentAmounts} from "./interfaces/ISmartnodesToken.sol";
-import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
+/*
+  SmartnodesDAO
 
-/**
- * @title SmartnodesDAO
- * @dev DAO contract for network governance using unclaimed rewards as voting power
- * @dev Manages proposals for adding and removing networks
- * @dev Voting power is based on unclaimed token rewards at the time of proposal creation
- */
-contract SmartnodesDAO is Ownable {
-    /** Errors */
-    error DAO__InvalidProposal();
-    error DAO__ProposalNotActive();
-    error DAO__AlreadyVoted();
-    error DAO__InsufficientVotingPower();
-    error DAO__ProposalNotPassed();
-    error DAO__ProposalAlreadyExecuted();
-    error DAO__ExecutionFailed();
-    error DAO__ProposalExpired();
-    error DAO__InvalidAddress();
+  - Quadratic voting: voter supplies `n` votes and must stake `n * n` tokens.
+  - Supports proposals that contain up to 3 targets (addresses) and arbitrary calldata per target.
+  - Votes are counted as `n` (not n^2); tokens staked = n^2 and are locked in DAO until refund.
+  - Simple quorum and voting window; admin (deployer) can update parameters.
+  - Uses SafeERC20 & ReentrancyGuard.
+*/
 
-    enum ProposalType {
-        ADD_NETWORK,
-        REMOVE_NETWORK,
-        UPDATE_PARAMETERS
-    }
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
-    enum ProposalStatus {
-        Pending,
-        Active,
-        Passed,
-        Failed,
-        Executed,
-        Cancelled,
-        Expired
-    }
+contract SmartnodesDAO is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+    using Address for address;
+
+    error SmartnodesDAO__ZeroAddress();
+    error SmartnodesDAO__TooManyTargets();
+    error SmartnodesDAO__InvalidVotingPeriod();
+    error SmartnodesDAO__NotEnoughStake();
+    error SmartnodesDAO__AlreadyVoted();
+    error SmartnodesDAO__ProposalNotActive();
+    error SmartnodesDAO__ProposalAlreadyExecuted();
+    error SmartnodesDAO__NotProposerOrAdmin();
+    error SmartnodesDAO__ExecutionFailed(uint256 idx);
+    error SmartnodesDAO__AlreadyClaimed();
+    error SmartnodesDAO__NoLockedTokens();
+
+    IERC20 public immutable token; // your SNO token
+    address public admin;
+
+    uint256 public proposalCount;
+    uint256 public votingPeriod; // seconds
 
     struct Proposal {
         uint256 id;
         address proposer;
-        ProposalType proposalType;
-        ProposalStatus status;
-        uint256 forVotes;
-        uint256 againstVotes;
+        address[] targets; // up to 3
+        bytes[] calldatas; // same length as targets
+        string description;
         uint256 startTime;
         uint256 endTime;
-        uint256 snapshotBlock;
-        uint256 totalVotingPowerAtSnapshot;
-        bytes executionData;
-        string description;
+        uint256 forVotes; // sum of votes (n)
+        uint256 againstVotes; // sum of votes (n)
         bool executed;
+        bool canceled;
     }
 
-    struct Vote {
-        bool hasVoted;
-        bool support;
-        uint256 votingPower;
-        uint256 snapshotVotingPower; // Voting power at proposal creation
-    }
-
-    /** Constants */
-    uint256 private constant VOTING_PERIOD = 7 days;
-    uint256 private constant MIN_VOTING_POWER = 1000e18; // Minimum tokens to create proposal
-    uint256 private constant QUORUM_PERCENTAGE = 10; // 10% of total unclaimed rewards at snapshot
-    uint256 private constant PASS_THRESHOLD = 51; // 51% of votes cast
-    uint256 private constant EXECUTION_DELAY = 1 days; // Delay after voting ends before execution
-
-    /** State Variables */
-    ISmartnodesToken public immutable i_tokenContract;
-    ISmartnodesCore public immutable i_smartnodesCore;
-
-    uint256 public proposalCounter;
+    // proposalId => Proposal
     mapping(uint256 => Proposal) public proposals;
-    mapping(uint256 => mapping(address => Vote)) public votes;
 
-    // Snapshot of voting power at proposal creation
-    mapping(uint256 => mapping(address => uint256)) public votingPowerSnapshots;
+    // proposalId => voter => votesCast (n)
+    mapping(uint256 => mapping(address => uint256)) public votesCast;
 
-    /** Events */
+    // proposalId => voter => tokensLocked (n*n)
+    mapping(uint256 => mapping(address => uint256)) public tokensLocked;
+
+    // voter => total tokens locked across proposals (helper)
+    mapping(address => uint256) public totalTokensLockedBy;
+
+    // Events
     event ProposalCreated(
-        uint256 indexed proposalId,
+        uint256 indexed id,
         address indexed proposer,
-        ProposalType proposalType,
-        string description,
-        uint256 snapshotBlock,
-        uint256 totalVotingPower
+        address[] targets,
+        uint256 startTime,
+        uint256 endTime,
+        string description
     );
-    event VoteCast(
+    event Voted(
         uint256 indexed proposalId,
         address indexed voter,
         bool support,
-        uint256 votingPower
+        uint256 votes,
+        uint256 tokensStaked
     );
     event ProposalExecuted(uint256 indexed proposalId);
-    event ProposalCancelled(uint256 indexed proposalId);
-    event ProposalExpired(uint256 indexed proposalId);
+    event ProposalCanceled(uint256 indexed proposalId);
+    event RefundClaimed(
+        uint256 indexed proposalId,
+        address indexed voter,
+        uint256 amount
+    );
+    event VotingParamsUpdated(uint256 votingPeriod, uint256 quorumVotes);
+    event AdminTransferred(address oldAdmin, address newAdmin);
 
-    modifier validProposal(uint256 _proposalId) {
-        if (_proposalId == 0 || _proposalId > proposalCounter) {
-            revert DAO__InvalidProposal();
-        }
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "SmartnodesDAO: only admin");
         _;
     }
 
-    modifier onlyActiveProposal(uint256 _proposalId) {
-        Proposal storage proposal = proposals[_proposalId];
-        if (proposal.status != ProposalStatus.Active) {
-            revert DAO__ProposalNotActive();
-        }
-        if (block.timestamp > proposal.endTime) {
-            // Mark as expired if voting period has ended
-            proposal.status = ProposalStatus.Expired;
-            emit ProposalExpired(_proposalId);
-            revert DAO__ProposalExpired();
-        }
-        _;
+    constructor(address _token, uint256 _votingPeriod) {
+        if (_token == address(0)) revert SmartnodesDAO__ZeroAddress();
+        if (_votingPeriod == 0) revert SmartnodesDAO__InvalidVotingPeriod();
+
+        token = IERC20(_token);
+        admin = msg.sender;
+        votingPeriod = _votingPeriod;
     }
 
-    constructor(
-        address _tokenContract,
-        address _smartnodesCore
-    ) Ownable(msg.sender) {
-        if (_tokenContract == address(0) || _smartnodesCore == address(0)) {
-            revert DAO__InvalidAddress();
-        }
-        i_tokenContract = ISmartnodesToken(_tokenContract);
-        i_smartnodesCore = ISmartnodesCore(_smartnodesCore);
+    // ---------- Admin / Config ----------
+    function transferAdmin(address _new) external onlyAdmin {
+        if (_new == address(0)) revert SmartnodesDAO__ZeroAddress();
+        address old = admin;
+        admin = _new;
+        emit AdminTransferred(old, _new);
     }
 
-    /**
-     * @notice Create a proposal to add a new network
-     * @param _networkName Name of the network to add
-     * @param _description Description of the proposal
-     */
-    function proposeAddNetwork(
-        string calldata _networkName,
-        string calldata _description
-    ) external returns (uint256 proposalId) {
-        uint256 votingPower = getCurrentVotingPower(msg.sender);
-        if (votingPower < MIN_VOTING_POWER) {
-            revert DAO__InsufficientVotingPower();
+    // ---------- Proposal lifecycle ----------
+    /// @notice Create a proposal with 1..3 targets and associated calldata.
+    function propose(
+        address[] calldata targets,
+        bytes[] calldata calldatas,
+        string calldata description
+    ) external returns (uint256) {
+        uint256 tlen = targets.length;
+        if (tlen == 0 || tlen > 3) revert SmartnodesDAO__TooManyTargets();
+        if (calldatas.length != tlen) revert("mismatched arrays");
+
+        proposalCount++;
+        uint256 id = proposalCount;
+
+        Proposal storage p = proposals[id];
+        p.id = id;
+        p.proposer = msg.sender;
+
+        // copy arrays
+        p.targets = new address[](tlen);
+        p.calldatas = new bytes[](tlen);
+        for (uint256 i = 0; i < tlen; ++i) {
+            if (targets[i] == address(0)) revert SmartnodesDAO__ZeroAddress();
+            p.targets[i] = targets[i];
+            p.calldatas[i] = calldatas[i];
         }
 
-        proposalId = _createProposal(
-            ProposalType.ADD_NETWORK,
-            abi.encodeWithSelector(
-                ISmartnodesCore.addNetwork.selector,
-                _networkName
-            ),
-            _description
-        );
-    }
-
-    /**
-     * @notice Create a proposal to remove a network
-     * @param _networkId ID of the network to remove
-     * @param _description Description of the proposal
-     */
-    function proposeRemoveNetwork(
-        uint8 _networkId,
-        string calldata _description
-    ) external returns (uint256 proposalId) {
-        uint256 votingPower = getCurrentVotingPower(msg.sender);
-        if (votingPower < MIN_VOTING_POWER) {
-            revert DAO__InsufficientVotingPower();
-        }
-
-        proposalId = _createProposal(
-            ProposalType.REMOVE_NETWORK,
-            abi.encodeWithSelector(
-                ISmartnodesCore.removeNetwork.selector,
-                _networkId
-            ),
-            _description
-        );
-    }
-
-    /**
-     * @notice Internal function to create a proposal with snapshot
-     */
-    function _createProposal(
-        ProposalType _proposalType,
-        bytes memory _executionData,
-        string calldata _description
-    ) internal returns (uint256 proposalId) {
-        proposalId = ++proposalCounter;
-
-        // Take snapshot of current unclaimed rewards
-        (uint128 totalUnclaimedSNO, ) = i_tokenContract.getTotalUnclaimed();
-
-        proposals[proposalId] = Proposal({
-            id: proposalId,
-            proposer: msg.sender,
-            proposalType: _proposalType,
-            status: ProposalStatus.Active,
-            forVotes: 0,
-            againstVotes: 0,
-            startTime: block.timestamp,
-            endTime: block.timestamp + VOTING_PERIOD,
-            snapshotBlock: block.number,
-            totalVotingPowerAtSnapshot: totalUnclaimedSNO,
-            executionData: _executionData,
-            description: _description,
-            executed: false
-        });
+        p.description = description;
+        p.startTime = block.timestamp;
+        p.endTime = block.timestamp + votingPeriod;
+        p.executed = false;
+        p.canceled = false;
 
         emit ProposalCreated(
-            proposalId,
+            id,
             msg.sender,
-            _proposalType,
-            _description,
-            block.number,
-            totalUnclaimedSNO
+            p.targets,
+            p.startTime,
+            p.endTime,
+            description
         );
+        return id;
     }
 
-    /**
-     * @notice Cast a vote on a proposal using unclaimed rewards as voting power
-     * @param _proposalId ID of the proposal to vote on
-     * @param _support Whether to support the proposal (true) or vote against (false)
-     */
-    function castVote(
-        uint256 _proposalId,
-        bool _support
-    ) external validProposal(_proposalId) onlyActiveProposal(_proposalId) {
-        Vote storage userVote = votes[_proposalId][msg.sender];
-        if (userVote.hasVoted) {
-            revert DAO__AlreadyVoted();
-        }
+    /// @notice Quadratic voting: voter chooses `n` votes. Required token stake = n * n.
+    /// Voter must approve DAO for at least `n*n` tokens prior to calling.
+    function vote(
+        uint256 proposalId,
+        uint256 nVotes,
+        bool support
+    ) external nonReentrant {
+        Proposal storage p = proposals[proposalId];
+        if (p.id == 0) revert("proposal not found");
+        if (block.timestamp < p.startTime || block.timestamp >= p.endTime)
+            revert SmartnodesDAO__ProposalNotActive();
+        if (nVotes == 0) revert("votes must be > 0");
+        if (votesCast[proposalId][msg.sender] != 0)
+            revert SmartnodesDAO__AlreadyVoted(); // one vote per voter per proposal in this simple design
 
-        // Get current voting power (unclaimed rewards)
-        uint256 votingPower = getCurrentVotingPower(msg.sender);
-        if (votingPower == 0) {
-            revert DAO__InsufficientVotingPower();
-        }
+        // cost = nVotes * nVotes
+        uint256 cost = nVotes * nVotes;
 
-        // Record the vote
-        userVote.hasVoted = true;
-        userVote.support = _support;
-        userVote.votingPower = votingPower;
+        // transfer tokens in from voter to DAO (staking)
+        token.safeTransferFrom(msg.sender, address(this), cost);
 
-        // Update proposal vote counts
-        Proposal storage proposal = proposals[_proposalId];
-        if (_support) {
-            proposal.forVotes += votingPower;
+        // record
+        votesCast[proposalId][msg.sender] = nVotes;
+        tokensLocked[proposalId][msg.sender] = cost;
+        totalTokensLockedBy[msg.sender] += cost;
+
+        if (support) {
+            p.forVotes += nVotes;
         } else {
-            proposal.againstVotes += votingPower;
+            p.againstVotes += nVotes;
         }
 
-        emit VoteCast(_proposalId, msg.sender, _support, votingPower);
+        emit Voted(proposalId, msg.sender, support, nVotes, cost);
     }
 
-    /**
-     * @notice Execute a passed proposal after the execution delay
-     * @param _proposalId ID of the proposal to execute
-     */
-    function executeProposal(
-        uint256 _proposalId
-    ) external validProposal(_proposalId) {
-        Proposal storage proposal = proposals[_proposalId];
+    /// @notice After voting period ends, anybody can call execute when passed.
+    function execute(uint256 proposalId) external nonReentrant {
+        Proposal storage p = proposals[proposalId];
+        if (p.id == 0) revert("proposal not found");
+        if (block.timestamp < p.endTime)
+            revert SmartnodesDAO__ProposalNotActive();
+        if (p.executed) revert SmartnodesDAO__ProposalAlreadyExecuted();
+        if (p.canceled) revert("proposal canceled");
 
-        if (proposal.executed) {
-            revert DAO__ProposalAlreadyExecuted();
+        uint256 quorumVotes = token.totalSupply() / 5; // must have at least 20% of existing holders votes
+
+        // pass conditions: forVotes > againstVotes && quorum reached
+        if (p.forVotes <= p.againstVotes) revert("proposal did not pass");
+        if (p.forVotes < quorumVotes) revert("quorum not reached");
+
+        // execute stored calls (revert if any call fails)
+        uint256 len = p.targets.length;
+        for (uint256 i = 0; i < len; ++i) {
+            (bool ok, bytes memory returndata) = p.targets[i].call{value: 0}(
+                p.calldatas[i]
+            );
+            if (!ok) {
+                // bubble up revert reason if present
+                revert SmartnodesDAO__ExecutionFailed(i);
+            }
         }
 
-        // Check if voting period has ended
-        if (block.timestamp <= proposal.endTime) {
-            revert DAO__ProposalNotActive();
-        }
-
-        // Check if execution delay has passed
-        if (block.timestamp < proposal.endTime + EXECUTION_DELAY) {
-            revert DAO__ProposalNotActive();
-        }
-
-        // Determine if proposal passed
-        _updateProposalStatus(_proposalId);
-
-        if (proposal.status != ProposalStatus.Passed) {
-            revert DAO__ProposalNotPassed();
-        }
-
-        proposal.executed = true;
-
-        // Execute the proposal
-        (bool success, ) = address(i_smartnodesCore).call(
-            proposal.executionData
-        );
-        if (!success) {
-            revert DAO__ExecutionFailed();
-        }
-
-        proposal.status = ProposalStatus.Executed;
-        emit ProposalExecuted(_proposalId);
+        p.executed = true;
+        emit ProposalExecuted(proposalId);
     }
 
-    /**
-     * @notice Update proposal status after voting period ends
-     * @param _proposalId ID of the proposal to update
-     */
-    function _updateProposalStatus(uint256 _proposalId) internal {
-        Proposal storage proposal = proposals[_proposalId];
+    /// @notice Proposer or admin can cancel an active proposal (refunds still claimable)
+    function cancel(uint256 proposalId) external {
+        Proposal storage p = proposals[proposalId];
+        if (p.id == 0) revert("proposal not found");
+        if (msg.sender != p.proposer && msg.sender != admin)
+            revert SmartnodesDAO__NotProposerOrAdmin();
+        if (p.executed) revert SmartnodesDAO__ProposalAlreadyExecuted();
+        p.canceled = true;
+        emit ProposalCanceled(proposalId);
+    }
 
-        if (
-            proposal.status != ProposalStatus.Active &&
-            proposal.status != ProposalStatus.Expired
-        ) {
-            return; // Status already determined
-        }
+    // ---------- Refunds ----------
+    /// @notice After the voting ends (or after execution/cancel), voter can reclaim their staked tokens.
+    function claimRefund(uint256 proposalId) external nonReentrant {
+        Proposal storage p = proposals[proposalId];
+        if (p.id == 0) revert("proposal not found");
+        if (block.timestamp < p.endTime && !p.executed && !p.canceled)
+            revert("voting still active");
 
-        uint256 totalVotes = proposal.forVotes + proposal.againstVotes;
+        uint256 locked = tokensLocked[proposalId][msg.sender];
+        if (locked == 0) revert SmartnodesDAO__NoLockedTokens();
 
-        // Check quorum based on snapshot
-        bool quorumReached = (totalVotes * 100) >=
-            (proposal.totalVotingPowerAtSnapshot * QUORUM_PERCENTAGE);
+        // zero out before transfer
+        tokensLocked[proposalId][msg.sender] = 0;
+        uint256 ref = totalTokensLockedBy[msg.sender];
 
-        // Check if majority supports
-        bool majoritySupports = totalVotes > 0 &&
-            (proposal.forVotes * 100) >= (totalVotes * PASS_THRESHOLD);
-
-        if (quorumReached && majoritySupports) {
-            proposal.status = ProposalStatus.Passed;
+        // reduce totalTokensLockedBy safely
+        if (ref >= locked) {
+            ref -= locked;
         } else {
-            proposal.status = ProposalStatus.Failed;
+            ref = 0;
         }
+
+        token.safeTransfer(msg.sender, locked);
+        emit RefundClaimed(proposalId, msg.sender, locked);
     }
 
-    /**
-     * @notice Check and update proposal status if voting period has ended
-     * @param _proposalId ID of the proposal to check
-     */
-    function updateProposalStatus(
-        uint256 _proposalId
-    ) external validProposal(_proposalId) {
-        Proposal storage proposal = proposals[_proposalId];
-
-        if (
-            proposal.status == ProposalStatus.Active &&
-            block.timestamp > proposal.endTime
-        ) {
-            _updateProposalStatus(_proposalId);
-        }
-    }
-
-    /**
-     * @notice Get current voting power of an address based on unclaimed rewards
-     * @param _user Address to check voting power for
-     * @return votingPower Amount of voting power (unclaimed SNO rewards)
-     */
-    function getCurrentVotingPower(
-        address _user
-    ) public view returns (uint256 votingPower) {
-        PaymentAmounts memory unclaimedRewards = i_tokenContract
-            .getUnclaimedRewards(_user);
-        return uint256(unclaimedRewards.sno);
-    }
-
-    /**
-     * @notice Get voting power of an address at the time a specific proposal was created
-     * @param _proposalId ID of the proposal
-     * @param _user Address to check voting power for
-     * @return votingPower Amount of voting power at proposal snapshot
-     */
-    function getVotingPowerAtSnapshot(
-        uint256 _proposalId,
-        address _user
-    ) public view returns (uint256 votingPower) {
-        // For this implementation, we'll use current voting power
-        // In a more sophisticated system, you might want to store historical snapshots
-        return getCurrentVotingPower(_user);
-    }
-
-    /**
-     * @notice Get proposal details
-     * @param _proposalId ID of the proposal
-     */
+    // ---------- Views ----------
     function getProposal(
-        uint256 _proposalId
+        uint256 proposalId
     ) external view returns (Proposal memory) {
-        return proposals[_proposalId];
+        return proposals[proposalId];
     }
 
-    /**
-     * @notice Get vote details for a user on a specific proposal
-     * @param _proposalId ID of the proposal
-     * @param _user Address of the voter
-     */
-    function getVote(
-        uint256 _proposalId,
-        address _user
-    ) external view returns (Vote memory) {
-        return votes[_proposalId][_user];
+    function getVotesOf(
+        uint256 proposalId,
+        address voter
+    ) external view returns (uint256 votes, uint256 lockedTokens) {
+        votes = votesCast[proposalId][voter];
+        lockedTokens = tokensLocked[proposalId][voter];
     }
 
-    /**
-     * @notice Get proposal results and status
-     * @param _proposalId ID of the proposal
-     */
-    function getProposalResults(
-        uint256 _proposalId
-    )
-        external
-        view
-        validProposal(_proposalId)
-        returns (
-            uint256 forVotes,
-            uint256 againstVotes,
-            uint256 totalVotes,
-            bool quorumReached,
-            bool majoritySupports,
-            ProposalStatus status
-        )
-    {
-        Proposal storage proposal = proposals[_proposalId];
-
-        forVotes = proposal.forVotes;
-        againstVotes = proposal.againstVotes;
-        totalVotes = forVotes + againstVotes;
-
-        quorumReached =
-            (totalVotes * 100) >=
-            (proposal.totalVotingPowerAtSnapshot * QUORUM_PERCENTAGE);
-        majoritySupports =
-            totalVotes > 0 &&
-            (forVotes * 100) >= (totalVotes * PASS_THRESHOLD);
-
-        status = proposal.status;
-    }
-
-    /**
-     * @notice Cancel a proposal (only owner or proposer)
-     * @param _proposalId ID of the proposal to cancel
-     */
-    function cancelProposal(
-        uint256 _proposalId
-    ) external validProposal(_proposalId) {
-        Proposal storage proposal = proposals[_proposalId];
-
-        // Only owner or proposer can cancel
-        require(
-            msg.sender == owner() || msg.sender == proposal.proposer,
-            "Not authorized to cancel"
-        );
-
-        require(
-            proposal.status == ProposalStatus.Active ||
-                proposal.status == ProposalStatus.Pending,
-            "Cannot cancel proposal"
-        );
-
-        proposal.status = ProposalStatus.Cancelled;
-        emit ProposalCancelled(_proposalId);
-    }
-
-    /**
-     * @notice Get governance parameters
-     */
-    function getGovernanceParameters()
-        external
-        pure
-        returns (
-            uint256 votingPeriod,
-            uint256 minVotingPower,
-            uint256 quorumPercentage,
-            uint256 passThreshold,
-            uint256 executionDelay
-        )
-    {
-        return (
-            VOTING_PERIOD,
-            MIN_VOTING_POWER,
-            QUORUM_PERCENTAGE,
-            PASS_THRESHOLD,
-            EXECUTION_DELAY
-        );
-    }
-
-    /**
-     * @notice Check if an address can create proposals
-     * @param _user Address to check
-     */
-    function canCreateProposal(address _user) external view returns (bool) {
-        return getCurrentVotingPower(_user) >= MIN_VOTING_POWER;
-    }
-
-    /**
-     * @notice Check if an address can vote on a proposal
-     * @param _proposalId ID of the proposal
-     * @param _user Address to check
-     */
-    function canVote(
-        uint256 _proposalId,
-        address _user
-    ) external view returns (bool) {
-        if (_proposalId == 0 || _proposalId > proposalCounter) {
-            return false;
-        }
-
-        Proposal storage proposal = proposals[_proposalId];
-        if (proposal.status != ProposalStatus.Active) {
-            return false;
-        }
-
-        if (block.timestamp > proposal.endTime) {
-            return false;
-        }
-
-        if (votes[_proposalId][_user].hasVoted) {
-            return false;
-        }
-
-        return getCurrentVotingPower(_user) > 0;
-    }
+    receive() external payable {}
 }

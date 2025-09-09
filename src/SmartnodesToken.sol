@@ -2,20 +2,18 @@
 pragma solidity ^0.8.22;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
-
-// import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
-// import {ERC20Permit} from "@openzeppelin/contracts/token/ER
-// import {Govenor} from "@openzeppelin/contracts/governance/Governor.sol";
+import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
+import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 
 /**
  * @title Smartnodes Payment and Governance Token
- * @dev Non-upgradeable ERC20 token for job payments and rewards with governance capabilities for SmartnodesCore/Coordinator.
- * @dev Features reward assignment during SmartnodesCore state updates, which can be claimed by workers and validators.
- * @dev Provides a locking mechanism for validators on SmartnodesCore, and a yearly reward reduction mechanism.
+ * @dev Non-upgradeable ERC20 token for job payments and rewards with governance capabilities.
+ * @dev Uses simple DAO-based access control system.
  */
-contract SmartnodesToken is ERC20, Ownable {
+contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
     /** Errors */
     error Token__InsufficientBalance();
     error Token__InvalidAddress();
@@ -24,7 +22,16 @@ contract SmartnodesToken is ERC20, Ownable {
     error Token__UnlockPending();
     error Token__TransferFailed();
     error Token__CoreNotSet();
+    error Token__DAONotSet();
     error Token__CoreAlreadySet();
+    error Token__InvalidMerkleRoot();
+    error Token__InvalidMerkleProof();
+    error Token__DistributionNotActive();
+    error Token__RewardsAlreadyClaimed();
+    error Token__InvalidValidatorLength();
+    error Token__ETHTransferFailed();
+    error Token__OnlyDAO();
+    error Token__DAOAlreadySet();
 
     struct LockedTokens {
         bool locked;
@@ -48,35 +55,48 @@ contract SmartnodesToken is ERC20, Ownable {
     struct EthBreakdown {
         uint256 totalContractEth;
         uint256 unclaimedEth;
-        uint256 daoEth;
         uint256 escrowedEth;
         uint256 availableEth;
     }
 
+    struct MerkleDistribution {
+        bytes32 merkleRoot;
+        PaymentAmounts workerReward;
+        uint256 totalCapacity;
+        bool active;
+        uint256 timestamp;
+    }
+
     /** Constants */
     uint8 private constant VALIDATOR_REWARD_PERCENTAGE = 10;
-    uint8 private constant DAO_REWARD_PERCENTAGE = 5;
     uint256 private constant INITIAL_EMISSION_RATE = 5832e18;
     uint256 private constant TAIL_EMISSION = 512e18;
-    uint256 private constant REWARD_PERIOD = 365 days; // 1 year in seconds
+    uint256 private constant REWARD_PERIOD = 365 days;
     uint256 private constant UNLOCK_PERIOD = 14 days;
     uint256 private immutable i_deploymentTimestamp;
 
     /** State Variables */
-    ISmartnodesCore public s_smartnodesCore; // Mutable reference instead of immutable
-    bool public s_coreSet; // Flag to ensure core can only be set once
+    ISmartnodesCore public s_smartnodesCore;
+    bool public s_coreSet;
 
-    uint256 public s_validatorLockAmount = 500_000e18;
-    uint256 public s_userLockAmount = 500e18;
+    // Simple DAO access control
+    address public s_dao;
+    bool public s_daoSet;
 
-    PaymentAmounts public s_daoFunds;
+    uint256 public s_currentDistributionId;
+    uint256 public s_validatorLockAmount = 1_000_000e18;
+    uint256 public s_userLockAmount = 100e18;
+
     PaymentAmounts public s_totalUnclaimed;
+    PaymentAmounts public s_totalEscrowed;
+    uint256 public s_totalLocked;
 
+    mapping(uint256 => MerkleDistribution) public s_distributions;
+    mapping(uint256 => mapping(address => bool)) public s_claimed;
     mapping(address => LockedTokens) private s_lockedTokens;
-    mapping(address => PaymentAmounts) private s_unclaimedRewards;
-    mapping(address => PaymentAmounts) private s_totalClaimed;
     mapping(address => PaymentAmounts) private s_escrowedPayments;
 
+    /** Modifiers */
     modifier onlySmartnodesCore() {
         if (address(s_smartnodesCore) == address(0)) {
             revert Token__CoreNotSet();
@@ -87,16 +107,18 @@ contract SmartnodesToken is ERC20, Ownable {
         _;
     }
 
-    event PaymentEscrowed(
-        address indexed user,
-        uint256 payment,
-        uint8 networkId
-    );
-    event EthPaymentEscrowed(
-        address indexed user,
-        uint256 payment,
-        uint8 networkId
-    );
+    modifier onlyDAO() {
+        if (s_dao != address(0)) {
+            if (msg.sender != s_dao) {
+                revert Token__OnlyDAO();
+            }
+        }
+        _;
+    }
+
+    /** Events */
+    event PaymentEscrowed(address indexed user, uint256 payment);
+    event EthPaymentEscrowed(address indexed user, uint256 payment);
     event EscrowReleased(address indexed user, uint256 amount);
     event EthEscrowReleased(address indexed user, uint256 amount);
     event TokensLocked(address indexed user, bool isValidator, uint256 amount);
@@ -109,12 +131,29 @@ contract SmartnodesToken is ERC20, Ownable {
     event EthRewardsClaimed(address indexed user, uint256 amount);
     event TokenRewardsClaimed(address indexed user, uint256 amount);
     event CoreContractSet(address indexed coreContract);
+    event DAOSet(address indexed dao);
+    event ValidatorLockAmountUpdated(uint256 oldAmount, uint256 newAmount);
+    event UserLockAmountUpdated(uint256 oldAmount, uint256 newAmount);
+    event MerkleDistributionCreated(
+        uint256 indexed distributionId,
+        bytes32 merkleRoot,
+        uint256 totalSnoRewards,
+        uint256 totalEthRewards,
+        uint256 timestamp
+    );
+    event ValidatorRewardsDistributed(
+        uint256 indexed distributionId,
+        address[] validators,
+        uint256 totalSno,
+        uint256 totalEth
+    );
 
     constructor(
         address[] memory _genesisNodes
-    ) ERC20("SmartnodesToken", "SNO") Ownable(msg.sender) {
+    ) ERC20("SmartnodesToken", "SNO") ERC20Permit("SmartnodesToken") {
         i_deploymentTimestamp = block.timestamp;
         s_coreSet = false;
+        s_daoSet = false;
 
         // Mint initial tokens to genesis nodes
         uint256 gensisNodesLength = _genesisNodes.length;
@@ -123,11 +162,33 @@ contract SmartnodesToken is ERC20, Ownable {
         }
     }
 
+    receive() external payable {}
+
+    // ============ DAO Setup ============
     /**
-     * @dev Sets the SmartnodesCore contract address. Can only be called once by owner.
+     * @dev Sets the DAO contract address. Can only be called once by deployer before DAO is set.
+     * @param _dao Address of the deployed DAO contract
+     */
+    function setDAO(address _dao) external {
+        if (s_daoSet) {
+            revert Token__DAOAlreadySet();
+        }
+        if (_dao == address(0)) {
+            revert Token__InvalidAddress();
+        }
+
+        s_dao = _dao;
+        s_daoSet = true;
+
+        emit DAOSet(_dao);
+    }
+
+    // ============ DAO-Controlled Functions ============
+    /**
+     * @dev Sets the SmartnodesCore contract address. Can only be called by DAO.
      * @param _smartnodesCore Address of the deployed SmartnodesCore contract
      */
-    function setSmartnodesCore(address _smartnodesCore) external onlyOwner {
+    function setSmartnodesCore(address _smartnodesCore) external onlyDAO {
         if (s_coreSet) {
             revert Token__CoreAlreadySet();
         }
@@ -141,7 +202,308 @@ contract SmartnodesToken is ERC20, Ownable {
         emit CoreContractSet(_smartnodesCore);
     }
 
-    // ============ Locking & Payments ============
+    /**
+     * @dev Sets validator lock amount. Can only be called by DAO.
+     * @param _newAmount New validator lock amount
+     */
+    function setValidatorLockAmount(uint256 _newAmount) external onlyDAO {
+        uint256 oldAmount = s_validatorLockAmount;
+        s_validatorLockAmount = _newAmount;
+        emit ValidatorLockAmountUpdated(oldAmount, _newAmount);
+    }
+
+    /**
+     * @dev Sets user lock amount. Can only be called by DAO.
+     * @param _newAmount New user lock amount
+     */
+    function setUserLockAmount(uint256 _newAmount) external onlyDAO {
+        uint256 oldAmount = s_userLockAmount;
+        s_userLockAmount = _newAmount;
+        emit UserLockAmountUpdated(oldAmount, _newAmount);
+    }
+
+    // ============ Emissions & Halving ============
+
+    /**
+     * @notice Distribute validator rewards with bias towards tx.origin
+     * @param _approvedValidators List of validators that voted
+     * @param _validatorReward Total reward amounts for validators
+     * @param _distributionId Current distribution ID for events
+     * @dev 10% of validator rewards go to tx.origin, remaining 90% split equally among all validators
+     * @dev tx.origin receives both the bias amount and their equal share
+     */
+    function _distributeValidatorRewards(
+        address[] memory _approvedValidators,
+        PaymentAmounts memory _validatorReward,
+        uint256 _distributionId
+    ) internal {
+        uint8 _nValidators = uint8(_approvedValidators.length);
+
+        // Calculate bias amount (10% of total validator reward goes to tx.origin)
+        uint256 snoBiasAmount = (uint256(_validatorReward.sno) * 10) / 100;
+        uint256 ethBiasAmount = (uint256(_validatorReward.eth) * 10) / 100;
+
+        // Remaining 90% to be split equally among all validators
+        uint256 snoRemainingPool = uint256(_validatorReward.sno) -
+            snoBiasAmount;
+        uint256 ethRemainingPool = uint256(_validatorReward.eth) -
+            ethBiasAmount;
+
+        uint256 snoPerValidator = snoRemainingPool / _nValidators;
+        uint256 ethPerValidator = ethRemainingPool / _nValidators;
+
+        // Handle dust/remainder
+        uint256 snoRemainder = snoRemainingPool -
+            (snoPerValidator * _nValidators);
+        uint256 ethRemainder = ethRemainingPool -
+            (ethPerValidator * _nValidators);
+
+        // Distribute to validators
+        for (uint256 i = 0; i < _nValidators; i++) {
+            address validator = _approvedValidators[i];
+            if (validator == address(0)) revert Token__InvalidAddress();
+
+            uint256 snoShare = snoPerValidator;
+            uint256 ethShare = ethPerValidator;
+
+            // tx.origin gets the bias amount
+            if (validator == tx.origin) {
+                snoShare += snoBiasAmount;
+                ethShare += ethBiasAmount;
+            }
+
+            // First validator gets remainder to avoid dust
+            if (i == 0) {
+                snoShare += snoRemainder;
+                ethShare += ethRemainder;
+            }
+
+            _payValidator(validator, snoShare, ethShare);
+        }
+
+        emit ValidatorRewardsDistributed(
+            _distributionId,
+            _approvedValidators,
+            _validatorReward.sno,
+            _validatorReward.eth
+        );
+    }
+
+    /**
+     * @notice Helper function to pay a validator both SNO tokens and ETH
+     * @param validator Address of the validator to pay
+     * @param snoAmount Amount of SNO tokens to mint/send
+     * @param ethAmount Amount of ETH to transfer
+     */
+    function _payValidator(
+        address validator,
+        uint256 snoAmount,
+        uint256 ethAmount
+    ) internal {
+        if (snoAmount > 0) {
+            _mint(validator, snoAmount);
+            emit TokenRewardsClaimed(validator, uint128(snoAmount));
+        }
+
+        if (ethAmount > 0) {
+            (bool sent, ) = validator.call{value: ethAmount}("");
+            if (!sent) revert Token__ETHTransferFailed();
+            emit EthRewardsClaimed(validator, uint128(ethAmount));
+        }
+    }
+
+    /**
+     * @notice Distribute rewards to workers and validators
+     * @param _merkleRoot Root of state update and payments data
+     * @param _totalCapacity Total capacity of contributed workers
+     * @param _payments Additional payments to be added to the current emission rate
+     * @param _approvedValidators List of validators that voted
+     * @dev Workers receive 90% of the total reward, validators receive 10%
+     * @dev Rewards are distributed with bias towards tx.origin validator, then proportionally to workers based on their capacities
+     * @dev This function is called by SmartnodesCore during state updates to distribute rewards.
+     */
+    function createMerkleDistribution(
+        bytes32 _merkleRoot,
+        uint256 _totalCapacity,
+        address[] memory _approvedValidators,
+        PaymentAmounts calldata _payments
+    ) external onlySmartnodesCore {
+        uint8 _nValidators = uint8(_approvedValidators.length);
+        if (_nValidators == 0) revert Token__InvalidValidatorLength();
+        if (!s_daoSet || s_dao == address(0)) revert Token__DAONotSet();
+
+        // Total rewards to be distributed
+        PaymentAmounts memory totalReward = PaymentAmounts({
+            sno: uint128(getEmissionRate() + _payments.sno),
+            eth: _payments.eth
+        });
+
+        uint256 distributionId = ++s_currentDistributionId;
+
+        if (_totalCapacity == 0) {
+            // All rewards go to validators
+            _distributeValidatorRewards(
+                _approvedValidators,
+                totalReward,
+                distributionId
+            );
+            return; // exit early
+        }
+
+        // Split validator/worker share from the remaining pool
+        PaymentAmounts memory validatorReward = PaymentAmounts({
+            sno: uint128(
+                (uint256(totalReward.sno) * VALIDATOR_REWARD_PERCENTAGE) / 100
+            ),
+            eth: uint128(
+                (uint256(totalReward.eth) * VALIDATOR_REWARD_PERCENTAGE) / 100
+            )
+        });
+
+        PaymentAmounts memory workerReward = PaymentAmounts({
+            sno: totalReward.sno - validatorReward.sno,
+            eth: totalReward.eth - validatorReward.eth
+        });
+
+        // Update reward storage info (only validator + worker)
+        s_totalUnclaimed.sno += validatorReward.sno + workerReward.sno;
+        s_totalUnclaimed.eth += validatorReward.eth + workerReward.eth;
+
+        // Store merkle distribution
+        s_distributions[distributionId] = MerkleDistribution({
+            merkleRoot: _merkleRoot,
+            workerReward: workerReward,
+            totalCapacity: _totalCapacity,
+            active: true,
+            timestamp: block.timestamp
+        });
+
+        emit MerkleDistributionCreated(
+            distributionId,
+            _merkleRoot,
+            totalReward.sno,
+            totalReward.eth,
+            block.timestamp
+        );
+
+        // Update total unclaimed (subtract validator rewards since they're paid immediately)
+        s_totalUnclaimed.sno -= validatorReward.sno;
+        s_totalUnclaimed.eth -= validatorReward.eth;
+
+        // Distribute validator rewards with tx.origin bias
+        _distributeValidatorRewards(
+            _approvedValidators,
+            validatorReward,
+            distributionId
+        );
+    }
+
+    /**
+     * @notice Claim rewards from a Merkle distribution
+     * @param _distributionId The ID of the distribution to claim from
+     * @param _capacity Worker capacity associate with rewards claim
+     * @param _merkleProof Merkle proof validating the claim
+     * @dev Users can claim their rewards by providing a valid Merkle proof
+     */
+    function claimMerkleRewards(
+        uint256 _distributionId,
+        uint256 _capacity,
+        bytes32[] calldata _merkleProof
+    ) external {
+        MerkleDistribution memory distribution = s_distributions[
+            _distributionId
+        ];
+
+        if (!distribution.active) {
+            revert Token__DistributionNotActive();
+        }
+
+        if (s_claimed[_distributionId][msg.sender]) {
+            revert Token__RewardsAlreadyClaimed();
+        }
+
+        // Verify Merkle proof
+        bytes32 leaf = keccak256(abi.encode(msg.sender, _capacity));
+        if (!MerkleProof.verify(_merkleProof, distribution.merkleRoot, leaf)) {
+            revert Token__InvalidMerkleProof();
+        }
+
+        // Mark as claimed
+        s_claimed[_distributionId][msg.sender] = true;
+
+        uint128 eth;
+        uint128 sno;
+
+        // Calculate worker rewards
+        uint256 totalWorkerCapacity = distribution.totalCapacity;
+
+        eth = uint128(
+            (distribution.workerReward.eth * _capacity) / totalWorkerCapacity
+        );
+        sno = uint128(
+            (distribution.workerReward.sno * _capacity) / totalWorkerCapacity
+        );
+
+        // Update total unclaimed
+        s_totalUnclaimed.eth -= eth;
+        s_totalUnclaimed.sno -= sno;
+
+        // Mint SNO tokens
+        _mint(msg.sender, sno);
+
+        // Transfer ETH
+        (bool sent, ) = msg.sender.call{value: eth}("");
+        if (!sent) {
+            revert Token__ETHTransferFailed();
+        }
+
+        emit TokenRewardsClaimed(msg.sender, sno);
+        emit EthRewardsClaimed(msg.sender, eth);
+    }
+
+    /**
+     * @return era 0 for the first era, 1 after the first year, 2 after the second, …
+     */
+    function _currentEra() internal view returns (uint256 era) {
+        unchecked {
+            era = (block.timestamp - i_deploymentTimestamp) / REWARD_PERIOD;
+        }
+    }
+
+    /**
+     * @notice Get the current emission rate based on the era
+     * @return The current emission rate
+     */
+    function _emissionForEra(uint256 era) internal pure returns (uint256) {
+        if (era == 0) return INITIAL_EMISSION_RATE;
+
+        // initial * (0.6)^era
+        uint256 emission = INITIAL_EMISSION_RATE;
+        for (uint256 i = 0; i < era; i++) {
+            emission = (emission * 6000) / 10000;
+            if (emission <= TAIL_EMISSION) return TAIL_EMISSION;
+        }
+
+        return emission;
+    }
+
+    /**
+     * @notice Get the current emission rate
+     * @return Current emission rate for this era
+     */
+    function getEmissionRate() public view returns (uint256) {
+        return _emissionForEra(_currentEra());
+    }
+
+    /**
+     * @notice Get current era number
+     * @return Current era (0-based)
+     */
+    function getCurrentEra() external view returns (uint256) {
+        return _currentEra();
+    }
+
+    // ============ Token Locking for Validators ============
 
     /**
      * @notice Lock tokens for a validator or user
@@ -172,6 +534,9 @@ contract SmartnodesToken is ERC20, Ownable {
 
         locked.locked = true;
         locked.isValidator = _isValidator;
+
+        // Update total locked tracking
+        s_totalLocked += lockAmount;
 
         _transfer(_user, address(this), lockAmount);
         emit TokensLocked(_user, _isValidator, lockAmount);
@@ -209,6 +574,9 @@ contract SmartnodesToken is ERC20, Ownable {
                 lockAmount = s_userLockAmount;
             }
 
+            // Update total locked tracking
+            s_totalLocked -= lockAmount;
+
             delete s_lockedTokens[_user];
             _transfer(address(this), _user, lockAmount);
             emit TokensUnlocked(_user, locked.isValidator, lockAmount);
@@ -221,15 +589,29 @@ contract SmartnodesToken is ERC20, Ownable {
     }
 
     /**
+     * @dev Check if user has locked tokens
+     */
+    function isLocked(address user) external view returns (bool) {
+        return s_lockedTokens[user].locked;
+    }
+
+    /**
+     * @dev Get user's lock information
+     */
+    function getLockInfo(
+        address user
+    ) external view returns (LockedTokens memory) {
+        return s_lockedTokens[user];
+    }
+
+    /**
      * @notice Escrow payment for a job
      * @param _user The address of the user receiving the payment
      * @param _payment The amount of payment to be escrowed
-     * @param _networkId The ID of the network for which the payment is being made
      */
     function escrowPayment(
         address _user,
-        uint256 _payment,
-        uint8 _networkId
+        uint256 _payment
     ) external onlySmartnodesCore {
         if (_user == address(0)) {
             revert Token__InvalidAddress();
@@ -240,20 +622,22 @@ contract SmartnodesToken is ERC20, Ownable {
 
         // Transfer payment to the contract
         _transfer(_user, address(this), _payment);
+
+        // Update individual and total escrowed amounts
         s_escrowedPayments[_user].sno += uint128(_payment);
-        emit PaymentEscrowed(_user, _payment, _networkId);
+        s_totalEscrowed.sno += uint128(_payment);
+
+        emit PaymentEscrowed(_user, _payment);
     }
 
     /**
      * @notice Escrow ETH payment for a job
      * @param _user The address of the user making the payment
      * @param _payment The amount of ETH payment to be escrowed
-     * @param _networkId The ID of the network for which the payment is being made
      */
     function escrowEthPayment(
         address _user,
-        uint256 _payment,
-        uint8 _networkId
+        uint256 _payment
     ) external payable onlySmartnodesCore {
         if (_user == address(0)) {
             revert Token__InvalidAddress();
@@ -262,8 +646,11 @@ contract SmartnodesToken is ERC20, Ownable {
             revert Token__InsufficientBalance();
         }
 
+        // Update individual and total escrowed amounts
         s_escrowedPayments[_user].eth += uint128(_payment);
-        emit EthPaymentEscrowed(_user, _payment, _networkId);
+        s_totalEscrowed.eth += uint128(_payment);
+
+        emit EthPaymentEscrowed(_user, _payment);
     }
 
     /**
@@ -283,8 +670,10 @@ contract SmartnodesToken is ERC20, Ownable {
             revert Token__InsufficientBalance();
         }
 
-        // Transfer the escrowed payment to the user
+        // Update individual and total escrowed amounts
         s_escrowedPayments[_user].sno -= uint128(_amount);
+        s_totalEscrowed.sno -= uint128(_amount);
+
         emit EscrowReleased(_user, _amount);
     }
 
@@ -306,467 +695,14 @@ contract SmartnodesToken is ERC20, Ownable {
             revert Token__InsufficientBalance();
         }
 
-        // Reduce the escrowed amount (ETH stays in contract for reward distribution)
+        // Update individual and total escrowed amounts
         s_escrowedPayments[_user].eth -= uint128(_amount);
+        s_totalEscrowed.eth -= uint128(_amount);
+
         emit EthEscrowReleased(_user, _amount);
     }
 
-    // ============ Emissions & Halving ============
-
-    /**
-     * @notice Distribute rewards to workers and validators
-     * @param _validators Array of validator addresses who voted
-     * @param _workers Array of worker addresses who performed work
-     * @param _capacities Array of capacities for each worker (not used in this implementation)
-     * @param _payments Additional payments to be added to the current emission rate
-     * @dev Workers receive 90% of the total reward, validators receive 10%
-     * @dev Rewards are distributed evenly among validators who voted, and distributed proportionally to workers based on their capacities
-     * @dev Workers and validators can claim their rewards later
-     * @dev This function is called by SmartnodesCore during state updates to distribute rewards
-     */
-    function mintRewards(
-        address[] calldata _validators,
-        address[] calldata _workers,
-        uint256[] calldata _capacities,
-        PaymentAmounts calldata _payments
-    ) external onlySmartnodesCore {
-        // Total rewards to be distributed
-        PaymentAmounts memory totalReward = PaymentAmounts({
-            sno: uint128(getEmissionRate()) + _payments.sno,
-            eth: _payments.eth
-        });
-
-        // DAO cut
-        PaymentAmounts memory daoReward = PaymentAmounts({
-            sno: uint128(
-                (uint256(totalReward.sno) * DAO_REWARD_PERCENTAGE) / 100
-            ),
-            eth: uint128(
-                (uint256(totalReward.eth) * DAO_REWARD_PERCENTAGE) / 100
-            )
-        });
-
-        // Update reward storage info
-        totalReward.sno -= daoReward.sno;
-        totalReward.eth -= daoReward.eth;
-
-        s_daoFunds.sno += daoReward.sno;
-        s_daoFunds.eth += daoReward.eth;
-        s_totalUnclaimed.sno += totalReward.sno;
-        s_totalUnclaimed.eth += totalReward.eth;
-
-        // Split validator/worker share
-        PaymentAmounts memory validatorReward = _splitRewardForValidators(
-            totalReward
-        );
-        PaymentAmounts memory workerReward = PaymentAmounts({
-            sno: totalReward.sno - validatorReward.sno,
-            eth: totalReward.eth - validatorReward.eth
-        });
-
-        _distributeToValidators(_validators, validatorReward);
-        _distributeToWorkers(_workers, _capacities, workerReward);
-    }
-
-    function _splitRewardForValidators(
-        PaymentAmounts memory totalReward
-    ) internal pure returns (PaymentAmounts memory validatorReward) {
-        validatorReward = PaymentAmounts({
-            sno: uint128(
-                (uint256(totalReward.sno) * VALIDATOR_REWARD_PERCENTAGE) / 100
-            ),
-            eth: uint128(
-                (uint256(totalReward.eth) * VALIDATOR_REWARD_PERCENTAGE) / 100
-            )
-        });
-    }
-
-    function _distributeToValidators(
-        address[] calldata validators,
-        PaymentAmounts memory totalReward
-    ) internal {
-        uint256 len = validators.length;
-        if (len == 0) return;
-
-        PaymentAmounts memory sharePerValidator = PaymentAmounts({
-            sno: uint128(uint256(totalReward.sno) / len),
-            eth: uint128(uint256(totalReward.eth) / len)
-        });
-
-        for (uint256 i = 0; i < len; ) {
-            address v = validators[i];
-            s_unclaimedRewards[v].sno += sharePerValidator.sno;
-            s_unclaimedRewards[v].eth += sharePerValidator.eth;
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    function _distributeToWorkers(
-        address[] calldata workers,
-        uint256[] calldata capacities,
-        PaymentAmounts memory totalReward
-    ) internal {
-        uint256 len = workers.length;
-        if (len == 0) return;
-
-        uint256 totalCapacity;
-        for (uint256 i = 0; i < capacities.length; ) {
-            totalCapacity += capacities[i];
-            unchecked {
-                ++i;
-            }
-        }
-        if (totalCapacity == 0) return;
-
-        for (uint256 i = 0; i < len; ) {
-            address w = workers[i];
-            uint256 cap = capacities[i];
-
-            PaymentAmounts memory workerShare = PaymentAmounts({
-                sno: uint128((uint256(totalReward.sno) * cap) / totalCapacity),
-                eth: uint128((uint256(totalReward.eth) * cap) / totalCapacity)
-            });
-
-            s_unclaimedRewards[w].sno += workerShare.sno;
-            s_unclaimedRewards[w].eth += workerShare.eth;
-
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    /**
-     * @notice Claim unclaimed SNO token rewards for a worker or validator
-     * @dev Workers and validators can call this function to claim their unclaimed SNO token rewards
-     */
-    function claimTokenRewards() external {
-        uint256 unclaimed = s_unclaimedRewards[msg.sender].sno;
-
-        if (unclaimed == 0) {
-            revert Token__InsufficientBalance();
-        }
-
-        // Reset unclaimed token rewards for the caller
-        s_unclaimedRewards[msg.sender].sno = 0;
-        s_totalUnclaimed.sno -= uint128(unclaimed);
-
-        // Update total claimed rewards
-        s_totalClaimed[msg.sender].sno += uint128(unclaimed);
-
-        // Mint the claimed rewards to the caller
-        _mint(msg.sender, unclaimed);
-        emit TokenRewardsClaimed(msg.sender, unclaimed);
-    }
-
-    /**
-     * @notice Claim unclaimed ETH rewards for a worker or validator
-     * @dev Workers and validators can call this function to claim their unclaimed ETH rewards
-     */
-    function claimEthRewards() external {
-        uint256 unclaimed = s_unclaimedRewards[msg.sender].eth;
-
-        if (unclaimed == 0) {
-            revert Token__InsufficientBalance();
-        }
-
-        // Reset unclaimed ETH rewards for the caller
-        s_unclaimedRewards[msg.sender].eth = 0;
-        s_totalUnclaimed.eth -= uint128(unclaimed);
-
-        // Update total claimed rewards
-        s_totalClaimed[msg.sender].eth += uint128(unclaimed);
-
-        // Transfer ETH to the caller
-        (bool success, ) = payable(msg.sender).call{value: unclaimed}("");
-        if (!success) {
-            revert Token__TransferFailed();
-        }
-        emit EthRewardsClaimed(msg.sender, unclaimed);
-    }
-
-    /**
-     * @notice Claim both SNO token and ETH rewards in a single transaction
-     * @dev More gas efficient than calling both claim functions separately
-     */
-    function claimAllRewards() external {
-        PaymentAmounts memory unclaimed = s_unclaimedRewards[msg.sender];
-
-        if (unclaimed.sno == 0 && unclaimed.eth == 0) {
-            revert Token__InsufficientBalance();
-        }
-
-        // Reset all unclaimed rewards for the caller
-        delete s_unclaimedRewards[msg.sender];
-        s_totalUnclaimed.sno -= unclaimed.sno;
-        s_totalUnclaimed.eth -= unclaimed.eth;
-
-        // Update total claimed rewards
-        s_totalClaimed[msg.sender].sno += unclaimed.sno;
-        s_totalClaimed[msg.sender].eth += unclaimed.eth;
-
-        // Mint SNO tokens if any
-        if (unclaimed.sno > 0) {
-            _mint(msg.sender, unclaimed.sno);
-            emit TokenRewardsClaimed(msg.sender, unclaimed.sno);
-        }
-
-        // Transfer ETH if any
-        if (unclaimed.eth > 0) {
-            (bool success, ) = payable(msg.sender).call{value: unclaimed.eth}(
-                ""
-            );
-            if (!success) {
-                revert Token__TransferFailed();
-            }
-            emit EthRewardsClaimed(msg.sender, unclaimed.eth);
-        }
-    }
-
-    /**
-     * @return era 0 for the first era, 1 after the first year, 2 after the second, …
-     */
-    function _currentEra() internal view returns (uint256 era) {
-        unchecked {
-            era = (block.timestamp - i_deploymentTimestamp) / REWARD_PERIOD;
-        }
-    }
-
-    /**
-     * @notice Get the current emission rate based on the era
-     * @return The current emission rate
-     */
-    function _emissionForEra(uint256 era) internal pure returns (uint256) {
-        if (era == 0) {
-            return INITIAL_EMISSION_RATE;
-        }
-
-        // Each era is 3/5 of the previous era
-        uint256 emission = INITIAL_EMISSION_RATE;
-        for (uint256 i = 0; i < era; ) {
-            emission = (emission / 5) * 3;
-            // Stop diminishing once we reach tail emission
-            if (emission <= TAIL_EMISSION) {
-                return TAIL_EMISSION;
-            }
-            unchecked {
-                ++i;
-            }
-        }
-
-        return emission;
-    }
-
-    /**
-     * @notice Get current emission rate based on era
-     */
-    function getEmissionRate() public view returns (uint256 emissionRate) {
-        uint256 era = _currentEra();
-        emissionRate = _emissionForEra(era);
-    }
-
-    // =============== Helper Functions for Supply Calculation ===============
-
-    /**
-     * @notice Calculate total locked SNO tokens across all users
-     * @return totalLocked The total amount of SNO tokens currently locked
-     */
-    function _calculateTotalLocked()
-        internal
-        view
-        returns (uint256 totalLocked)
-    {
-        // Note: This is a simplified approach. For a production contract,
-        // you might want to maintain a running total to avoid gas issues
-        // if you have many locked positions. This would require tracking
-        // total locked amounts in state variables.
-
-        // Since we can't efficiently iterate over all locked positions,
-        // we'll need to track this in state variables during lock/unlock operations
-        // For now, return the contract's token balance minus escrowed amounts
-        uint256 contractBalance = balanceOf(address(this));
-        uint256 totalEscrowed = _calculateTotalEscrowedTokens();
-
-        // Contract balance should equal locked tokens + escrowed tokens
-        if (contractBalance >= totalEscrowed) {
-            totalLocked = contractBalance - totalEscrowed;
-        }
-    }
-
-    /**
-     * @notice Calculate total escrowed SNO tokens across all users
-     * @return totalEscrowed The total amount of SNO tokens currently escrowed
-     */
-    function _calculateTotalEscrowedTokens()
-        internal
-        view
-        returns (uint256 totalEscrowed)
-    {
-        // Note: This is also simplified. In production, you'd want to track this
-        // in a state variable and update it during escrow/release operations
-        // to avoid potential gas issues with large numbers of escrowed positions
-
-        // For a more gas-efficient approach, add a state variable:
-        // uint256 public s_totalEscrowedTokens;
-        // and update it in escrowPayment() and releaseEscrowedPayment()
-
-        // This is a placeholder - you'd need to implement proper tracking
-        return 0; // Placeholder - implement proper tracking
-    }
-
-    /**
-     * @notice Calculate total escrowed ETH across all users
-     * @return totalEscrowedEth The total amount of ETH currently escrowed
-     */
-    function _calculateTotalEscrowedEth()
-        internal
-        view
-        returns (uint256 totalEscrowedEth)
-    {
-        // Similar to tokens - implement proper state tracking for production
-        return 0; // Placeholder - implement proper tracking
-    }
-
-    // =============== View Functions ===============
-
-    /**
-     * @notice Get comprehensive breakdown of SNO token supply
-     * @return breakdown Struct containing all supply metrics
-     */
-    function getSupplyBreakdown()
-        external
-        view
-        returns (SupplyBreakdown memory breakdown)
-    {
-        uint256 total = totalSupply();
-        uint256 locked = _calculateTotalLocked();
-        uint256 unclaimed = s_totalUnclaimed.sno;
-        uint256 escrowed = _calculateTotalEscrowedTokens();
-
-        breakdown = SupplyBreakdown({
-            totalSupply: total,
-            circulating: total - locked, // Circulating = not locked
-            locked: locked,
-            unclaimed: unclaimed, // These will be minted when claimed
-            escrowed: escrowed
-        });
-    }
-
-    /**
-     * @notice Get comprehensive breakdown of ETH in the contract
-     * @return breakdown Struct containing all ETH metrics
-     */
-    function getEthBreakdown()
-        external
-        view
-        returns (EthBreakdown memory breakdown)
-    {
-        uint256 contractEth = address(this).balance;
-        uint256 unclaimed = s_totalUnclaimed.eth;
-        uint256 daoEth = s_daoFunds.eth;
-        uint256 escrowed = _calculateTotalEscrowedEth();
-
-        // Available ETH = total - (unclaimed + dao + escrowed)
-        uint256 available = contractEth;
-        if (available >= unclaimed + daoEth + escrowed) {
-            available = available - unclaimed - daoEth - escrowed;
-        } else {
-            available = 0;
-        }
-
-        breakdown = EthBreakdown({
-            totalContractEth: contractEth,
-            unclaimedEth: unclaimed,
-            daoEth: daoEth,
-            escrowedEth: escrowed,
-            availableEth: available
-        });
-    }
-
-    /**
-     * @notice Get simple supply metrics (legacy function - kept for compatibility)
-     * @return totalSupply_ Total supply of SNO tokens
-     * @return totalLocked Total locked SNO tokens
-     * @return totalUnclaimed Total unclaimed SNO tokens (will be minted when claimed)
-     */
-    function getSupply()
-        external
-        view
-        returns (
-            uint256 totalSupply_,
-            uint256 totalLocked,
-            uint256 totalUnclaimed
-        )
-    {
-        totalSupply_ = totalSupply();
-        totalLocked = _calculateTotalLocked();
-        totalUnclaimed = s_totalUnclaimed.sno;
-    }
-
-    /**
-     * @notice Get total unclaimed rewards (both SNO and ETH)
-     * @return snoUnclaimed Total unclaimed SNO tokens
-     * @return ethUnclaimed Total unclaimed ETH
-     */
-    function getTotalUnclaimed()
-        external
-        view
-        returns (uint128 snoUnclaimed, uint128 ethUnclaimed)
-    {
-        return (s_totalUnclaimed.sno, s_totalUnclaimed.eth);
-    }
-
-    /**
-     * @notice Get DAO funds (both SNO and ETH)
-     * @return snoFunds SNO tokens allocated to DAO
-     * @return ethFunds ETH allocated to DAO
-     */
-    function getDaoFunds()
-        external
-        view
-        returns (uint128 snoFunds, uint128 ethFunds)
-    {
-        return (s_daoFunds.sno, s_daoFunds.eth);
-    }
-
-    /**
-     * @notice Get contract's ETH balance
-     * @return ethBalance Total ETH held by the contract
-     */
-    function getContractEthBalance()
-        external
-        view
-        returns (uint256 ethBalance)
-    {
-        return address(this).balance;
-    }
-
-    /**
-     * @dev Get the current SmartnodesCore contract address
-     */
-    function getSmartnodesCore() external view returns (address) {
-        return address(s_smartnodesCore);
-    }
-
-    /**
-     * @dev Get unclaimed rewards for a specific address
-     */
-    function getUnclaimedRewards(
-        address _user
-    ) external view returns (PaymentAmounts memory) {
-        return s_unclaimedRewards[_user];
-    }
-
-    /**
-     * @dev Get total claimed rewards for a specific address
-     */
-    function getTotalClaimed(
-        address _user
-    ) external view returns (PaymentAmounts memory) {
-        return s_totalClaimed[_user];
-    }
+    // ============ View Functions ============
 
     /**
      * @dev Get escrowed payments for a specific address
@@ -778,31 +714,95 @@ contract SmartnodesToken is ERC20, Ownable {
     }
 
     /**
-     * @dev Get locked token information for a specific address
+     * @notice Get supply breakdown
      */
-    function getLockedTokens(
-        address _user
-    ) external view returns (LockedTokens memory) {
-        return s_lockedTokens[_user];
-    }
-
-    /**
-     * @dev Check if a user has tokens locked
-     */
-    function isUserLocked(address _user) external view returns (bool) {
-        return
-            s_lockedTokens[_user].locked ||
-            s_lockedTokens[_user].unlockTime > 0;
-    }
-
-    /**
-     * @dev Get the lock amounts for validators and users
-     */
-    function getLockAmounts()
+    function getSupplyBreakdown()
         external
         view
-        returns (uint256 validatorAmount, uint256 userAmount)
+        returns (SupplyBreakdown memory)
     {
-        return (s_validatorLockAmount, s_userLockAmount);
+        uint256 total = totalSupply();
+        return
+            SupplyBreakdown({
+                totalSupply: total,
+                circulating: total -
+                    s_totalLocked -
+                    s_totalUnclaimed.sno -
+                    s_totalEscrowed.sno,
+                locked: s_totalLocked,
+                unclaimed: s_totalUnclaimed.sno,
+                escrowed: s_totalEscrowed.sno
+            });
+    }
+
+    /**
+     * @notice Get ETH breakdown
+     */
+    function getEthBreakdown() external view returns (EthBreakdown memory) {
+        uint256 contractEth = address(this).balance;
+        return
+            EthBreakdown({
+                totalContractEth: contractEth,
+                unclaimedEth: s_totalUnclaimed.eth,
+                escrowedEth: s_totalEscrowed.eth,
+                availableEth: contractEth -
+                    s_totalUnclaimed.eth -
+                    s_totalEscrowed.eth
+            });
+    }
+
+    /**
+     * @dev Get the current SmartnodesCore contract address
+     */
+    function getSmartnodesCore() external view returns (address) {
+        return address(s_smartnodesCore);
+    }
+
+    // ============ ERC20Votes Overrides ============
+
+    /**
+     * @dev Override to prevent voting with locked tokens
+     */
+    function _getVotingUnits(
+        address account
+    ) internal view virtual override returns (uint256) {
+        uint256 balance = balanceOf(account);
+
+        // Subtract locked tokens from voting power
+        if (s_lockedTokens[account].locked) {
+            uint256 lockAmount = s_lockedTokens[account].isValidator
+                ? s_validatorLockAmount
+                : s_userLockAmount;
+
+            if (balance >= lockAmount) {
+                balance -= lockAmount;
+            } else {
+                balance = 0;
+            }
+        }
+
+        return balance;
+    }
+
+    // ============ Required Overrides ============
+
+    /**
+     * @dev Override required by Solidity for multiple inheritance
+     */
+    function _update(
+        address from,
+        address to,
+        uint256 value
+    ) internal override(ERC20, ERC20Votes) {
+        super._update(from, to, value);
+    }
+
+    /**
+     * @dev Override required by Solidity for multiple inheritance
+     */
+    function nonces(
+        address owner
+    ) public view override(ERC20Permit, Nonces) returns (uint256) {
+        return super.nonces(owner);
     }
 }

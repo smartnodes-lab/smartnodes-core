@@ -46,9 +46,9 @@ interface ISmartnodesCore {
 
     function updateContract(
         bytes32[] calldata _jobIds,
-        address[] calldata _validators,
-        address[] calldata _workers,
-        uint256[] calldata _capacities
+        bytes32 _merkleRoot,
+        uint256 _totalCapacity,
+        address[] memory _approvedValidators
     ) external;
 
     function jobs(

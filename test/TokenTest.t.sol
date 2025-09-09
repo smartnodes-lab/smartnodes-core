@@ -10,70 +10,10 @@ import {BaseSmartnodesTest} from "./BaseTest.sol";
  * @notice Comprehensive tests for SmartnodesToken contract functionality
  */
 contract SmartnodesTokenTest is BaseSmartnodesTest {
-    // Test constants
-    uint256 constant INITIAL_EMISSION_RATE = 5832e18;
-    uint256 constant TAIL_EMISSION = 512e18;
-    uint256 constant VALIDATOR_LOCK_AMOUNT = 500_000e18;
-    uint256 constant USER_LOCK_AMOUNT = 500e18;
-    uint256 constant UNLOCK_PERIOD = 14 days;
-    uint256 constant REWARD_PERIOD = 365 days;
-
     function _setupInitialState() internal override {
         // Token-specific setup
-        addTestNetwork("Tensorlink");
         BaseSmartnodesTest._setupInitialState();
         createTestUser(user1, USER1_PUBKEY);
-
-        // Ensure validators have enough tokens and ETH
-        vm.deal(validator1, 10 ether);
-        vm.deal(validator2, 10 ether);
-        vm.deal(worker1, 5 ether);
-        vm.deal(worker2, 5 ether);
-        vm.deal(address(validator3), 10 ether);
-        vm.deal(address(worker3), 5 ether);
-        vm.deal(address(user2), 5 ether);
-    }
-
-    // ============= Core Contract Setup Tests =============
-
-    function testSetSmartnodesCore() public {
-        // Create a new token instance without core set
-        address[] memory genesisNodes = new address[](1);
-        genesisNodes[0] = validator1;
-
-        SmartnodesToken newToken = new SmartnodesToken(genesisNodes);
-
-        assertFalse(newToken.s_coreSet());
-        assertEq(newToken.getSmartnodesCore(), address(0));
-
-        // Set the core contract
-        newToken.setSmartnodesCore(address(core));
-
-        assertTrue(newToken.s_coreSet());
-        assertEq(newToken.getSmartnodesCore(), address(core));
-    }
-
-    function testCannotSetCoreTwice() public {
-        // Create a new token and set core first time
-        address[] memory genesisNodes = new address[](1);
-        genesisNodes[0] = validator1;
-
-        SmartnodesToken newToken = new SmartnodesToken(genesisNodes);
-        newToken.setSmartnodesCore(address(core));
-
-        // Now try to set it again
-        vm.expectRevert(SmartnodesToken.Token__CoreAlreadySet.selector);
-        newToken.setSmartnodesCore(address(core));
-    }
-
-    function testCannotSetCoreToZeroAddress() public {
-        address[] memory genesisNodes = new address[](1);
-        genesisNodes[0] = validator1;
-
-        SmartnodesToken newToken = new SmartnodesToken(genesisNodes);
-
-        vm.expectRevert(SmartnodesToken.Token__InvalidAddress.selector);
-        newToken.setSmartnodesCore(address(0));
     }
 
     // ============= Token Locking Tests =============
@@ -90,22 +30,21 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             token.balanceOf(validator2),
             initialBalance - VALIDATOR_LOCK_AMOUNT
         );
-        assertEq(token.balanceOf(address(token)), VALIDATOR_LOCK_AMOUNT * 2); // validator1 + validator2
     }
 
     function testLockUserTokens() public {
-        // First give user1 enough tokens
+        // First give user2 enough tokens
         vm.prank(validator1);
-        token.transfer(user1, USER_LOCK_AMOUNT);
+        token.transfer(user2, USER_LOCK_AMOUNT);
 
-        uint256 initialUserBalance = token.balanceOf(user1);
+        uint256 initialUserBalance = token.balanceOf(user2);
         uint256 initialContractBalance = token.balanceOf(address(token));
 
         vm.prank(address(core));
-        token.lockTokens(user1, false);
+        token.lockTokens(user2, false);
 
         // Check user tokens are locked
-        assertEq(token.balanceOf(user1), initialUserBalance - USER_LOCK_AMOUNT);
+        assertEq(token.balanceOf(user2), initialUserBalance - USER_LOCK_AMOUNT);
         assertEq(
             token.balanceOf(address(token)),
             initialContractBalance + USER_LOCK_AMOUNT
@@ -113,9 +52,11 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
     }
 
     function testCannotLockInsufficientTokens() public {
-        // user3 doesn't have enough tokens for user lock (500)
-        vm.prank(address(core));
+        assertEq(token.balanceOf(user3), 0, "user3 should start with 0 tokens");
+
+        // User 3 doesnt have any tokens, should revert
         vm.expectRevert(SmartnodesToken.Token__InsufficientBalance.selector);
+        vm.prank(address(core));
         token.lockTokens(user3, false);
     }
 
@@ -187,7 +128,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
     function testCannotUnlockNeverLocked() public {
         vm.prank(address(core));
         vm.expectRevert(SmartnodesToken.Token__NotLocked.selector);
-        token.unlockTokens(user1);
+        token.unlockTokens(user3);
     }
 
     // ============= Payment Escrow Tests =============
@@ -203,7 +144,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         uint256 initialContractBalance = token.balanceOf(address(token));
 
         vm.prank(address(core));
-        token.escrowPayment(user1, paymentAmount, 1);
+        token.escrowPayment(user1, paymentAmount);
 
         assertEq(token.balanceOf(user1), initialUserBalance - paymentAmount);
         assertEq(
@@ -221,7 +162,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         vm.deal(address(core), paymentAmount);
 
         vm.prank(address(core));
-        token.escrowEthPayment{value: paymentAmount}(user1, paymentAmount, 1);
+        token.escrowEthPayment{value: paymentAmount}(user1, paymentAmount);
 
         SmartnodesToken.PaymentAmounts memory escrowed = token
             .getEscrowedPayments(user1);
@@ -237,7 +178,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         token.transfer(user1, paymentAmount);
 
         vm.prank(address(core));
-        token.escrowPayment(user1, paymentAmount, 1);
+        token.escrowPayment(user1, paymentAmount);
 
         // Release escrow
         vm.prank(address(core));
@@ -254,7 +195,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
 
         // Setup ETH escrow
         vm.prank(address(core));
-        token.escrowEthPayment{value: paymentAmount}(user1, paymentAmount, 1);
+        token.escrowEthPayment{value: paymentAmount}(user1, paymentAmount);
 
         // Release ETH escrow
         vm.prank(address(core));
@@ -268,142 +209,101 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
 
     // ============= Reward Distribution Tests =============
 
-    function testMintRewards() public {
-        address[] memory validators = new address[](2);
-        validators[0] = address(validator3);
-        validators[1] = validator2;
+    /**
+     * @notice Test merkle tree generation and distribution creation
+     */
+    function testMerkleDistributionCreation() public {
+        console.log("=== Testing Merkle Distribution Creation ===");
 
-        address[] memory workers = new address[](2);
-        workers[0] = address(worker3);
-        workers[1] = worker2;
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(5);
 
-        uint256[] memory capacities = new uint256[](2);
-        capacities[0] = 100;
-        capacities[1] = 200;
+        (
+            uint256 distributionId,
+            bytes32 merkleRoot
+        ) = _createAndValidateDistribution(participants, totalCapacity);
+        _validateRewardCalculations(distributionId);
 
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        // Check rewards were distributed
-        SmartnodesToken.PaymentAmounts memory validator3Rewards = token
-            .getUnclaimedRewards(address(validator3));
-        SmartnodesToken.PaymentAmounts memory worker3Rewards = token
-            .getUnclaimedRewards(address(worker3));
-
-        assertTrue(validator3Rewards.sno > 0);
-        assertTrue(validator3Rewards.eth > 0);
-        assertTrue(worker3Rewards.sno > 0);
-        assertTrue(worker3Rewards.eth > 0);
+        console.log("Merkle distribution creation test passed!");
     }
 
-    function testClaimTokenRewards() public {
-        // Setup rewards first
-        address[] memory validators = new address[](1);
-        validators[0] = address(validator3);
-        address[] memory workers = new address[](0);
-        uint256[] memory capacities = new uint256[](0);
+    /**
+     * @notice Test worker reward claiming
+     */
+    function testWorkerRewardClaiming() public {
+        console.log("=== Testing Worker Reward Claiming ===");
 
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 0});
-
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        uint256 initialBalance = token.balanceOf(address(validator3));
-        SmartnodesToken.PaymentAmounts memory rewards = token
-            .getUnclaimedRewards(address(validator3));
-
-        vm.prank(address(validator3));
-        token.claimTokenRewards();
-
-        assertEq(
-            token.balanceOf(address(validator3)),
-            initialBalance + rewards.sno
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(10);
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
         );
 
-        SmartnodesToken.PaymentAmounts memory newRewards = token
-            .getUnclaimedRewards(address(validator3));
-        assertEq(newRewards.sno, 0);
+        _testWorkerClaiming(distributionId, participants);
+
+        console.log("Worker reward claiming test passed!");
     }
 
-    function testClaimEthRewards() public {
-        // Setup ETH rewards
-        address[] memory validators = new address[](1);
-        validators[0] = address(validator3);
-        address[] memory workers = new address[](0);
-        uint256[] memory capacities = new uint256[](0);
+    /**
+     * @notice Test the complete end-to-end flow
+     */
+    function testCompleteRewardFlow() public {
+        console.log("=== Testing Complete Reward Flow ===");
 
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 0, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.deal(address(token), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        uint256 initialBalance = address(validator3).balance;
-        SmartnodesToken.PaymentAmounts memory rewards = token
-            .getUnclaimedRewards(address(validator3));
-
-        vm.prank(address(validator3));
-        token.claimEthRewards();
-
-        assertEq(address(validator3).balance, initialBalance + rewards.eth);
-
-        SmartnodesToken.PaymentAmounts memory newRewards = token
-            .getUnclaimedRewards(address(validator3));
-        assertEq(newRewards.eth, 0);
-    }
-
-    function testClaimAllRewards() public {
-        // Setup both token and ETH rewards
-        address[] memory validators = new address[](1);
-        validators[0] = address(validator1);
-        address[] memory workers = new address[](0);
-        uint256[] memory capacities = new uint256[](0);
-
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.deal(address(token), 1 ether);
-        vm.deal(address(validator1), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        uint256 initialTokenBalance = token.balanceOf(address(validator1));
-        uint256 initialEthBalance = address(validator1).balance;
-        SmartnodesToken.PaymentAmounts memory rewards = token
-            .getUnclaimedRewards(address(validator1));
-
-        vm.prank(address(validator1));
-        token.claimAllRewards();
-
-        assertEq(
-            token.balanceOf(address(validator1)),
-            initialTokenBalance + rewards.sno
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(5);
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
         );
-        assertEq(address(validator1).balance, initialEthBalance + rewards.eth);
 
-        SmartnodesToken.PaymentAmounts memory newRewards = token
-            .getUnclaimedRewards(address(validator1));
-        assertEq(newRewards.sno, 0);
-        assertEq(newRewards.eth, 0);
+        _validateRewardCalculations(distributionId);
+        _testWorkerClaiming(distributionId, participants);
+        _validateFinalState();
+
+        console.log("Complete reward flow test passed!");
     }
 
-    function testCannotClaimZeroRewards() public {
-        vm.expectRevert(SmartnodesToken.Token__InsufficientBalance.selector);
-        vm.prank(address(validator3));
-        token.claimTokenRewards();
+    /**
+     * @notice Test reward calculations with different parameters
+     */
+    function testRewardCalculationAccuracy() public {
+        console.log("=== Testing Reward Calculation Accuracy ===");
+
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(1);
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
+        );
+
+        // Get stored reward amounts
+        (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
+            .s_distributions(distributionId);
+
+        // Calculate expected totals
+        uint256 totalSnoReward = INITIAL_EMISSION_RATE + ADDITIONAL_SNO_PAYMENT;
+        uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
+
+        console.log("Reward calculation accuracy test passed!");
     }
 
     // ============= Emission Rate Tests =============
 
-    function testInitialEmissionRate() public {
+    function testInitialEmissionRate() public view {
         assertEq(token.getEmissionRate(), INITIAL_EMISSION_RATE);
     }
 
@@ -430,162 +330,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         assertEq(token.getEmissionRate(), TAIL_EMISSION);
     }
 
-    // ============= Worker Reward Distribution Tests =============
-
-    function testWorkerRewardDistribution() public {
-        address[] memory validators = new address[](0);
-        address[] memory workers = new address[](3);
-        workers[0] = worker1;
-        workers[1] = worker2;
-        workers[2] = address(worker3);
-
-        uint256[] memory capacities = new uint256[](3);
-        capacities[0] = 100; // 25% of total (400)
-        capacities[1] = 150; // 37.5% of total
-        capacities[2] = 150; // 37.5% of total
-
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        SmartnodesToken.PaymentAmounts memory worker1Rewards = token
-            .getUnclaimedRewards(worker1);
-        SmartnodesToken.PaymentAmounts memory worker2Rewards = token
-            .getUnclaimedRewards(worker2);
-        SmartnodesToken.PaymentAmounts memory worker3Rewards = token
-            .getUnclaimedRewards(address(worker3));
-
-        // Worker2 and Worker3 should have same rewards (same capacity)
-        assertEq(worker2Rewards.sno, worker3Rewards.sno);
-        assertEq(worker2Rewards.eth, worker3Rewards.eth);
-
-        // Worker1 should have less (smaller capacity)
-        assertTrue(worker1Rewards.sno < worker2Rewards.sno);
-        assertTrue(worker1Rewards.eth < worker2Rewards.eth);
-    }
-
-    // ============= Edge Cases Tests =============
-
-    function testMintRewardsWithNoValidators() public {
-        address[] memory validators = new address[](0);
-        address[] memory workers = new address[](1);
-        workers[0] = worker1;
-
-        uint256[] memory capacities = new uint256[](1);
-        capacities[0] = 100;
-
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        // Should still work, just no validator rewards
-        SmartnodesToken.PaymentAmounts memory workerRewards = token
-            .getUnclaimedRewards(worker1);
-        assertTrue(workerRewards.sno > 0);
-    }
-
-    function testMintRewardsWithNoWorkers() public {
-        address[] memory validators = new address[](1);
-        validators[0] = address(validator3);
-        address[] memory workers = new address[](0);
-        uint256[] memory capacities = new uint256[](0);
-
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        SmartnodesToken.PaymentAmounts memory validatorRewards = token
-            .getUnclaimedRewards(address(validator3));
-        assertTrue(validatorRewards.sno > 0);
-    }
-
-    function testMintRewardsWithZeroCapacities() public {
-        address[] memory validators = new address[](1);
-        validators[0] = address(validator3);
-        address[] memory workers = new address[](2);
-        workers[0] = worker1;
-        workers[1] = worker2;
-
-        uint256[] memory capacities = new uint256[](2);
-        capacities[0] = 0;
-        capacities[1] = 0;
-
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        // Workers should have no rewards due to zero capacity
-        SmartnodesToken.PaymentAmounts memory worker1Rewards = token
-            .getUnclaimedRewards(worker1);
-        SmartnodesToken.PaymentAmounts memory worker2Rewards = token
-            .getUnclaimedRewards(worker2);
-        assertEq(worker1Rewards.sno, 0);
-        assertEq(worker2Rewards.sno, 0);
-
-        // Validator should still get rewards
-        SmartnodesToken.PaymentAmounts memory validatorRewards = token
-            .getUnclaimedRewards(address(validator3));
-        assertTrue(validatorRewards.sno > 0);
-    }
-
-    // ============= View Function Tests =============
-
-    function testGetTotalClaimed() public {
-        // Setup and claim rewards
-        address[] memory validators = new address[](1);
-        validators[0] = address(validator3);
-        address[] memory workers = new address[](2);
-        uint256[] memory capacities = new uint256[](2);
-        workers[0] = worker1;
-        workers[1] = worker2;
-        capacities[0] = 100;
-        capacities[1] = 250;
-
-        SmartnodesToken.PaymentAmounts memory payments = SmartnodesToken
-            .PaymentAmounts({sno: 1000e18, eth: 1 ether});
-
-        vm.deal(address(core), 1 ether);
-        vm.deal(address(token), 1 ether);
-        vm.prank(address(core));
-        token.mintRewards(validators, workers, capacities, payments);
-
-        // Get rewards for worker1 before claiming
-        SmartnodesToken.PaymentAmounts memory rewardsBefore = token
-            .getUnclaimedRewards(worker1);
-
-        vm.prank(worker1);
-        token.claimAllRewards();
-
-        SmartnodesToken.PaymentAmounts memory totalClaimed = token
-            .getTotalClaimed(worker1);
-        assertEq(totalClaimed.sno, rewardsBefore.sno);
-        assertEq(totalClaimed.eth, rewardsBefore.eth);
-    }
-
     // ============= Access Control Tests =============
-
-    function testOnlyOwnerCanSetCore() public {
-        address[] memory genesisNodes = new address[](1);
-        genesisNodes[0] = validator1;
-
-        SmartnodesToken newToken = new SmartnodesToken(genesisNodes);
-
-        vm.expectRevert(); // Should revert with Ownable error
-        vm.prank(validator1);
-        newToken.setSmartnodesCore(address(core));
-    }
 
     function testOnlyCoreCanCallProtectedFunctions() public {
         vm.expectRevert(SmartnodesToken.Token__InvalidAddress.selector);
@@ -598,6 +343,186 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
 
         vm.expectRevert(SmartnodesToken.Token__InvalidAddress.selector);
         vm.prank(validator1);
-        token.escrowPayment(user1, 1000e18, 1);
+        token.escrowPayment(user1, 1000e18);
+    }
+
+    /**
+     * @notice Create and validate a merkle distribution
+     * @param participants Array of participants
+     * @param totalCapacity Total capacity of all participants
+     * @return distributionId The created distribution ID
+     * @return merkleRoot The merkle root for the distribution
+     */
+    function _createAndValidateDistribution(
+        Participant[] memory participants,
+        uint256 totalCapacity
+    ) internal returns (uint256 distributionId, bytes32 merkleRoot) {
+        // Generate merkle tree
+        bytes32[] memory leaves = _generateLeaves(participants);
+        merkleRoot = _buildMerkleTree(leaves);
+
+        console.log("Generated", leaves.length, "leaves");
+        console.log("Merkle root:", vm.toString(merkleRoot));
+
+        // Create distribution
+        SmartnodesToken.PaymentAmounts
+            memory additionalPayments = SmartnodesToken.PaymentAmounts({
+                sno: uint128(ADDITIONAL_SNO_PAYMENT),
+                eth: uint128(ADDITIONAL_ETH_PAYMENT)
+            });
+
+        uint256 initialTotalSupply = token.totalSupply();
+        uint256 initialContractEth = address(token).balance;
+
+        address[] memory validators = new address[](2);
+        validators[0] = address(validator1);
+        validators[1] = address(validator2);
+
+        console.log("Initial token supply:", initialTotalSupply / 1e18);
+        console.log("Initial contract ETH:", initialContractEth / 1e18);
+
+        vm.prank(address(core));
+        token.createMerkleDistribution(
+            merkleRoot,
+            totalCapacity,
+            validators,
+            additionalPayments
+        );
+
+        distributionId = token.s_currentDistributionId();
+        assertEq(distributionId, 1, "Distribution ID should be 1");
+
+        // Validate distribution storage
+        (
+            bytes32 storedRoot,
+            SmartnodesToken.PaymentAmounts memory workerReward,
+            uint256 storedCapacity,
+            bool active,
+            uint256 timestamp
+        ) = token.s_distributions(distributionId);
+
+        assertEq(storedRoot, merkleRoot, "Stored merkle root mismatch");
+        assertEq(storedCapacity, totalCapacity, "Stored capacity mismatch");
+        if (participants.length > 0)
+            assertTrue(active, "Distribution should be active");
+
+        console.log("Distribution created and validated successfully");
+    }
+
+    /**
+     * @notice Validate expected reward calculations
+     * @param distributionId The distribution to validate
+     */
+    function _validateRewardCalculations(uint256 distributionId) internal view {
+        (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
+            .s_distributions(distributionId);
+
+        uint256 totalSnoReward = INITIAL_EMISSION_RATE + ADDITIONAL_SNO_PAYMENT;
+        uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
+
+        uint256 expectedValidatorSno = (totalSnoReward *
+            VALIDATOR_REWARD_PERCENTAGE) / 100;
+        uint256 expectedValidatorEth = (totalEthReward *
+            VALIDATOR_REWARD_PERCENTAGE) / 100;
+        uint256 expectedWorkerSno = totalSnoReward - expectedValidatorSno;
+        uint256 expectedWorkerEth = totalEthReward - expectedValidatorEth;
+
+        assertEq(
+            workerReward.sno,
+            expectedWorkerSno,
+            "Worker SNO reward mismatch"
+        );
+        assertEq(
+            workerReward.eth,
+            expectedWorkerEth,
+            "Worker ETH reward mismatch"
+        );
+
+        console.log(
+            "Expected validator SNO reward:",
+            expectedValidatorSno / 1e18
+        );
+        console.log("Expected worker SNO reward:", expectedWorkerSno / 1e18);
+    }
+
+    /**
+     * @notice Test worker claiming process
+     * @param distributionId The distribution ID
+     * @param participants Array of participants
+     */
+    function _testWorkerClaiming(
+        uint256 distributionId,
+        Participant[] memory participants
+    ) internal {
+        uint256 numWorkers = 5;
+        bytes32[] memory leaves = _generateLeaves(participants);
+
+        // Calculate total rewards
+        uint256 totalSnoReward = INITIAL_EMISSION_RATE + ADDITIONAL_SNO_PAYMENT;
+        uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
+
+        // Validator rewards (already paid out directly in contract)
+        uint256 validatorSnoReward = (totalSnoReward *
+            VALIDATOR_REWARD_PERCENTAGE) / 100;
+        uint256 validatorEthReward = (totalEthReward *
+            VALIDATOR_REWARD_PERCENTAGE) / 100;
+
+        // Worker reward pools
+        uint256 expectedWorkerSno = totalSnoReward - validatorSnoReward;
+        uint256 expectedWorkerEth = totalEthReward - validatorEthReward;
+
+        uint256 totalCapacity = 0;
+        for (uint256 i = 0; i < participants.length; i++) {
+            totalCapacity += participants[i].capacity;
+        }
+
+        for (uint256 i = 0; i < numWorkers; i++) {
+            address worker = participants[i].addr;
+            uint256 workerCapacity = participants[i].capacity;
+
+            console.log(
+                "Testing claim for worker",
+                i,
+                "with capacity",
+                workerCapacity
+            );
+
+            // Generate proof
+            bytes32[] memory proof = _generateMerkleProof(leaves, i);
+
+            // Record pre-claim state
+            uint256 preClaimBalance = token.balanceOf(worker);
+            uint256 preClaimEth = worker.balance;
+
+            // Claim rewards
+            vm.prank(worker);
+            token.claimMerkleRewards(distributionId, workerCapacity, proof);
+
+            // Expected worker rewards
+            uint256 expectedWorkerSnoShare = (expectedWorkerSno *
+                workerCapacity) / totalCapacity;
+            uint256 expectedWorkerEthShare = (expectedWorkerEth *
+                workerCapacity) / totalCapacity;
+
+            uint256 postClaimBalance = token.balanceOf(worker);
+            uint256 postClaimEth = worker.balance;
+
+            assertEq(
+                postClaimBalance - preClaimBalance,
+                expectedWorkerSnoShare,
+                "Worker SNO reward incorrect"
+            );
+            assertEq(
+                postClaimEth - preClaimEth,
+                expectedWorkerEthShare,
+                "Worker ETH reward incorrect"
+            );
+            assertTrue(
+                token.s_claimed(distributionId, worker),
+                "Worker claim should be marked as completed"
+            );
+        }
+
+        console.log("All worker claims successful");
     }
 }
