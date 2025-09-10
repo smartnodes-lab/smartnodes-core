@@ -200,7 +200,8 @@ contract SmartnodesCore {
         bytes32[] calldata _jobIds,
         bytes32 _merkleRoot,
         uint256 _totalCapacity,
-        address[] memory _approvedValidators
+        address[] memory _approvedValidators,
+        address _biasValidator
     ) external onlyCoordinator {
         // Get any job payments associated with reward
         PaymentAmounts memory additionalRewards = _processCompletedJobs(
@@ -211,7 +212,8 @@ contract SmartnodesCore {
             _merkleRoot,
             _totalCapacity,
             _approvedValidators,
-            additionalRewards
+            additionalRewards,
+            _biasValidator
         );
     }
 

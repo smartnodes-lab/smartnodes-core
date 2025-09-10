@@ -26,16 +26,17 @@ contract Deploy is Script {
         );
         SmartnodesCore core = new SmartnodesCore(address(token));
 
-        token.setSmartnodesCore(address(core));
         token.setDAO(address(dao));
 
         SmartnodesCoordinator coordinator = new SmartnodesCoordinator(
             3600,
             66,
             address(core),
+            address(token),
             initialActiveNodes
         );
 
+        token.setSmartnodes(address(core), address(coordinator));
         core.setCoordinator(address(coordinator));
 
         bytes32 publicKeyHash = vm.envBytes32("PUBLIC_KEY_HASH");

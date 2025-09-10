@@ -219,7 +219,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(5);
+        ) = _setupTestParticipants(5, false);
 
         (
             uint256 distributionId,
@@ -240,7 +240,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(10);
+        ) = _setupTestParticipants(100, false);
         (uint256 distributionId, ) = _createAndValidateDistribution(
             participants,
             totalCapacity
@@ -261,7 +261,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(5);
+        ) = _setupTestParticipants(1, false);
         (uint256 distributionId, ) = _createAndValidateDistribution(
             participants,
             totalCapacity
@@ -284,7 +284,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(1);
+        ) = _setupTestParticipants(1, false);
         (uint256 distributionId, ) = _createAndValidateDistribution(
             participants,
             totalCapacity
@@ -386,7 +386,8 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             merkleRoot,
             totalCapacity,
             validators,
-            additionalPayments
+            additionalPayments,
+            address(validator1)
         );
 
         distributionId = token.s_currentDistributionId();
@@ -454,7 +455,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         uint256 distributionId,
         Participant[] memory participants
     ) internal {
-        uint256 numWorkers = 5;
+        uint256 numWorkers = participants.length;
         bytes32[] memory leaves = _generateLeaves(participants);
 
         // Calculate total rewards
@@ -524,5 +525,62 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         }
 
         console.log("All worker claims successful");
+    }
+
+    function testClaim9999thWorker() public {
+        console.log("=== Testing claim for a specific worker ===");
+
+        _setupContractFunding();
+
+        // Let's do 1_000 participants
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(10_000, false);
+
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
+        );
+
+        // Pick the 10,000th worker (index 9999)
+        uint256 workerIndex = 9_999;
+        Participant memory worker = participants[workerIndex];
+
+        // Generate Merkle proof just for this worker
+        bytes32[] memory leaves = _generateLeaves(participants);
+        bytes32[] memory proof = _generateMerkleProof(leaves, workerIndex);
+
+        // Pre-claim balances
+        uint256 preClaimBalance = token.balanceOf(worker.addr);
+        uint256 preClaimEth = worker.addr.balance;
+
+        // Claim rewards
+        vm.prank(worker.addr);
+        token.claimMerkleRewards(distributionId, worker.capacity, proof);
+
+        // Calculate expected rewards
+        (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
+            .s_distributions(distributionId);
+
+        uint256 validatorSnoReward = ((INITIAL_EMISSION_RATE +
+            ADDITIONAL_SNO_PAYMENT) * VALIDATOR_REWARD_PERCENTAGE) / 100;
+        uint256 expectedWorkerSno = (INITIAL_EMISSION_RATE +
+            ADDITIONAL_SNO_PAYMENT) - validatorSnoReward;
+        uint256 expectedWorkerSnoShare = (expectedWorkerSno * worker.capacity) /
+            totalCapacity;
+
+        assertEq(
+            token.balanceOf(worker.addr) - preClaimBalance,
+            expectedWorkerSnoShare,
+            "Worker SNO reward incorrect"
+        );
+
+        assertTrue(
+            token.s_claimed(distributionId, worker.addr),
+            "Worker claim should be marked as completed"
+        );
+
+        console.log("Specific worker claim test passed!");
     }
 }

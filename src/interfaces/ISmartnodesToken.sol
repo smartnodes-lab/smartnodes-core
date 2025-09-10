@@ -11,8 +11,6 @@ struct PaymentAmounts {
  * @dev Interface for the SmartnodesToken contract
  */
 interface ISmartnodesToken {
-    function setGovernanceContract(address _governance) external;
-
     function setValidatorLockAmount(uint256 _newAmount) external;
 
     function setUserLockAmount(uint256 _newAmount) external;
@@ -33,7 +31,8 @@ interface ISmartnodesToken {
         bytes32 _merkleRoot,
         uint256 _totalCapacity,
         address[] memory _approvedValidators,
-        PaymentAmounts calldata _payments
+        PaymentAmounts calldata _payments,
+        address _biasValidator
     ) external;
 
     function claimMerkleRewards(
@@ -46,5 +45,8 @@ interface ISmartnodesToken {
 
     function getTotalUnclaimed() external view returns (uint128, uint128);
 
-    function setSmartnodesCore(address _smartnodesCore) external;
+    function setSmartnodes(
+        address _smartnodesCore,
+        address _smartnodesCoordinator
+    ) external;
 }

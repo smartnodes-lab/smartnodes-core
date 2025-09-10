@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
+import {ISmartnodesToken} from "./interfaces/ISmartnodesToken.sol";
 
 /**
  * @title SmartnodesCoordinator
@@ -13,6 +14,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     // ============= Errors ==============
     error Coordinator__NotValidator();
     error Coordinator__NotCoreContract();
+    error Coordinator__NotTokenContract();
     error Coordinator__NotEligibleValidator();
     error Coordinator__AlreadySubmittedProposal();
     error Coordinator__AlreadyVoted();
@@ -29,6 +31,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     // ============= State Variables ==============
     ISmartnodesCore private immutable i_smartnodesCore;
+    ISmartnodesToken private immutable i_smartnodesToken;
     uint8 private immutable i_requiredApprovalsPercentage;
 
     // Packed time-related variables
@@ -91,6 +94,12 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         _;
     }
 
+    modifier onlySmartnodesToken() {
+        if (msg.sender != address(i_smartnodesToken))
+            revert Coordinator__NotTokenContract();
+        _;
+    }
+
     modifier onlyEligibleValidator() {
         bool isSelectedValidator = _isCurrentRoundValidator(msg.sender);
         bool roundExpired = _isCurrentRoundExpired();
@@ -111,6 +120,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         uint128 _updateTime,
         uint8 _requiredApprovalsPercentage,
         address _smartnodesCore,
+        address _smartnodesToken,
         address[] memory _genesisNodes
     ) {
         if (
@@ -124,6 +134,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         }
 
         i_smartnodesCore = ISmartnodesCore(_smartnodesCore);
+        i_smartnodesToken = ISmartnodesToken(_smartnodesToken);
         i_requiredApprovalsPercentage = _requiredApprovalsPercentage;
 
         timeConfig = TimeConfig({
@@ -234,8 +245,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         uint256 totalCapacity,
         address[] calldata validatorsToRemove,
         bytes32[] calldata jobHashes,
-        address[] calldata workers,
-        uint256[] calldata capacities
+        bytes32 workersHash,
+        bytes32 capacitiesHash
     ) external onlyValidator nonReentrant {
         if (proposalId == 0 || proposalId > currentProposals.length) {
             revert Coordinator__InvalidProposalNumber();
@@ -262,8 +273,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             merkleRoot,
             validatorsToRemove,
             jobHashes,
-            workers,
-            capacities
+            workersHash,
+            capacitiesHash
         );
 
         if (computedHash != storedHash) {
@@ -291,7 +302,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             jobHashes,
             merkleRoot,
             totalCapacity,
-            approvedValidators
+            approvedValidators,
+            msg.sender
         );
     }
 
@@ -312,15 +324,11 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     // ============= ADMIN FUNCTIONS =============
     /**
-     * @notice Half update configuration parameters to allow double to proposal creation times
+     * @notice Change proposal creation timeframes
      */
-    function halfStateTime() external onlySmartnodesCore {
-        TimeConfig memory tc = timeConfig;
-        uint128 newUpdateTime = tc.updateTime / 2;
-        if (newUpdateTime == 0) newUpdateTime = 1; // Prevent zero update time
-
-        timeConfig.updateTime = newUpdateTime;
-        emit ConfigUpdated(newUpdateTime);
+    function updateTiming(uint256 _newInterval) external onlySmartnodesToken {
+        timeConfig.updateTime = uint128(_newInterval);
+        emit ConfigUpdated(_newInterval);
     }
 
     // ============= INTERNAL FUNCTIONS =============
@@ -419,10 +427,9 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         uint256 totalValidators = validators.length;
 
         if (totalValidators < 2) return 1;
-        if (totalValidators < 4) return 2;
-        if (totalValidators < 8) return 3;
-        if (totalValidators < 15) return 4;
-        return 5; // Max 5 validators for proposal submission
+        if (totalValidators < 5) return 2;
+        if (totalValidators < 10) return 3;
+        return 5;
     }
 
     function _cleanupExpiredRound() internal {
@@ -554,8 +561,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         bytes32 merkleRoot,
         address[] calldata validatorsToRemove,
         bytes32[] calldata jobHashes,
-        address[] calldata workers,
-        uint256[] calldata capacities
+        bytes32 workersHash,
+        bytes32 capacitiesHash
     ) internal pure returns (bytes32) {
         return
             keccak256(
@@ -564,8 +571,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
                     merkleRoot,
                     validatorsToRemove,
                     jobHashes,
-                    workers,
-                    capacities
+                    workersHash,
+                    capacitiesHash
                 )
             );
     }

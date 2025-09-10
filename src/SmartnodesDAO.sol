@@ -200,11 +200,12 @@ contract SmartnodesDAO is ReentrancyGuard {
         if (p.executed) revert SmartnodesDAO__ProposalAlreadyExecuted();
         if (p.canceled) revert("proposal canceled");
 
-        uint256 quorumVotes = token.totalSupply() / 5; // must have at least 20% of existing holders votes
+        uint256 quorumVotes = token.totalSupply() / 5 / 1e18; // must have at least 20% of existing holders votes
+        uint256 forVotesTokenEquivalent = p.forVotes * p.forVotes;
 
         // pass conditions: forVotes > againstVotes && quorum reached
         if (p.forVotes <= p.againstVotes) revert("proposal did not pass");
-        if (p.forVotes < quorumVotes) revert("quorum not reached");
+        if (forVotesTokenEquivalent < quorumVotes) revert("quorum not reached");
 
         // execute stored calls (revert if any call fails)
         uint256 len = p.targets.length;

@@ -16,13 +16,11 @@ abstract contract BaseSmartnodesTest is Test {
     uint256 constant ADDITIONAL_SNO_PAYMENT = 1000e18;
     uint256 constant ADDITIONAL_ETH_PAYMENT = 5 ether;
     uint256 constant INITIAL_EMISSION_RATE = 5832e18;
-    uint256 constant TAIL_EMISSION = 512e18;
+    uint256 constant TAIL_EMISSION = 420e18;
     uint256 constant VALIDATOR_LOCK_AMOUNT = 1_000_000e18;
     uint256 constant USER_LOCK_AMOUNT = 100e18;
     uint256 constant UNLOCK_PERIOD = 14 days;
     uint256 constant REWARD_PERIOD = 365 days;
-
-    // DAO constants
     uint256 constant DAO_VOTING_PERIOD = 7 days;
 
     // Test participants structure
@@ -74,54 +72,30 @@ abstract contract BaseSmartnodesTest is Test {
         genesisNodes.push(validator3);
         genesisNodes.push(user1);
         genesisNodes.push(user2);
-        genesisNodes.push(worker1);
-        genesisNodes.push(worker2);
-        genesisNodes.push(worker3);
+        // genesisNodes.push(worker1);
+        // genesisNodes.push(worker2);
+        // genesisNodes.push(worker3);
 
         token = new SmartnodesToken(genesisNodes);
         dao = new SmartnodesDAO(address(token), DAO_VOTING_PERIOD);
         core = new SmartnodesCore(address(token));
-
-        // Set DAO in token (can only be done once)
-        token.setSmartnodesCore(address(core));
-        token.setDAO(address(dao));
 
         // Deploy coordinator
         coordinator = new SmartnodesCoordinator(
             3600,
             66,
             address(core),
+            address(token),
             activeNodes
         );
 
-        // Set coordinator in core (this might also need to go through DAO in the future)
+        // Set DAO in token (can only be done once)
+        token.setSmartnodes(address(core), address(coordinator));
+
+        token.setDAO(address(dao));
         core.setCoordinator(address(coordinator));
 
         vm.stopPrank();
-    }
-
-    function _addMoreVotesToProposal(uint256 proposalId) internal {
-        // Add votes from other genesis nodes to reach quorum
-        address[] memory voters = new address[](3);
-        voters[0] = validator2;
-        voters[1] = validator3;
-        voters[2] = user1;
-
-        for (uint256 i = 0; i < voters.length; i++) {
-            vm.startPrank(voters[i]);
-
-            uint256 votesToCast = 40; // Each casts 40 votes
-            uint256 tokensNeeded = votesToCast * votesToCast; // 1600 tokens each
-
-            token.approve(address(dao), tokensNeeded);
-            dao.vote(proposalId, votesToCast, true);
-
-            vm.stopPrank();
-        }
-
-        // Total votes: 50 + 40 + 40 + 40 = 170 votes
-        // This should be enough for basic functionality, but you may need to adjust
-        // the quorum or add more voters depending on your needs
     }
 
     function _setupInitialState() internal virtual {
@@ -132,6 +106,8 @@ abstract contract BaseSmartnodesTest is Test {
         vm.deal(worker1, 5 ether);
         vm.deal(worker2, 5 ether);
         vm.deal(worker3, 5 ether);
+
+        _setupTestParticipants(10000, true);
 
         vm.prank(validator1);
         core.createValidator(VALIDATOR1_PUBKEY);
@@ -220,7 +196,7 @@ abstract contract BaseSmartnodesTest is Test {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(jobWorkers.length);
+        ) = _setupTestParticipants(jobWorkers.length, false);
         bytes32[] memory leaves = _generateLeaves(participants);
         bytes32 merkleRoot = _buildMerkleTree(leaves);
 
@@ -228,9 +204,9 @@ abstract contract BaseSmartnodesTest is Test {
             abi.encode(
                 merkleRoot,
                 validatorsToRemove,
-                jobHashes,
-                jobCapacities,
-                jobWorkers,
+                JOB_ID_1,
+                JOB_ID_1,
+                JOB_ID_1,
                 block.timestamp
             )
         );
@@ -394,7 +370,8 @@ abstract contract BaseSmartnodesTest is Test {
      * @return totalCapacity Total capacity of all participants
      */
     function _setupTestParticipants(
-        uint256 numWorkers
+        uint256 numWorkers,
+        bool deal
     )
         internal
         returns (Participant[] memory participants, uint256 totalCapacity)
@@ -415,8 +392,10 @@ abstract contract BaseSmartnodesTest is Test {
             });
             totalCapacity += capacity;
 
-            // Fund workers for testing
-            vm.deal(workerAddr, 1 ether);
+            if (deal) {
+                // Fund workers for testing
+                vm.deal(workerAddr, 1 ether);
+            }
         }
 
         console.log("Added workers with total capacity:", totalCapacity);

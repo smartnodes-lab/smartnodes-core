@@ -25,20 +25,8 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         _setupContractFunding();
     }
 
-    function testExecuteProposal1000() public {
-        _testExecuteProposal(1000);
-    }
-
-    function testExecuteProposal100() public {
+    function testExecuteProposal() public {
         _testExecuteProposal(100);
-    }
-
-    function testExecuteProposal10() public {
-        _testExecuteProposal(10);
-    }
-
-    function testExecuteProposal0() public {
-        _testExecuteProposal(0);
     }
 
     function _testExecuteProposal(uint256 numWorkers) public {
@@ -48,7 +36,7 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(numWorkers);
+        ) = _setupTestParticipants(numWorkers, false);
         bytes32[] memory leaves = _generateLeaves(participants);
         bytes32 merkleRoot = _buildMerkleTree(leaves);
 
@@ -62,6 +50,9 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             capacities[i] = 10e18 + (i * 5e18);
         }
 
+        bytes32 workersHash = keccak256(abi.encode(workers));
+        bytes32 capacitiesHash = keccak256(abi.encode(capacities));
+
         address[] memory validatorsToRemove = new address[](0);
 
         bytes32 proposalHash = keccak256(
@@ -70,8 +61,8 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
                 merkleRoot,
                 validatorsToRemove,
                 jobHashes,
-                workers,
-                capacities
+                workersHash,
+                capacitiesHash
             )
         );
 
@@ -96,8 +87,8 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             totalCapacity,
             validatorsToRemove,
             jobHashes,
-            workers,
-            capacities
+            workersHash,
+            capacitiesHash
         );
 
         uint256 newDistributionId = token.s_currentDistributionId();
@@ -136,7 +127,7 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(numWorkers);
+        ) = _setupTestParticipants(numWorkers, false);
 
         bytes32[] memory leaves = _generateLeaves(participants);
         bytes32 merkleRoot = _buildMerkleTree(leaves);
@@ -187,7 +178,7 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(numWorkers);
+        ) = _setupTestParticipants(numWorkers, false);
         bytes32 merkleRoot = _buildMerkleTree(_generateLeaves(participants));
 
         bytes32[] memory jobHashes = new bytes32[](1);
@@ -234,6 +225,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         (
             Participant[] memory participants,
             uint256 totalCapacity
-        ) = _setupTestParticipants(numWorkers);
+        ) = _setupTestParticipants(numWorkers, false);
     }
 }

@@ -48,7 +48,8 @@ interface ISmartnodesCore {
         bytes32[] calldata _jobIds,
         bytes32 _merkleRoot,
         uint256 _totalCapacity,
-        address[] memory _approvedValidators
+        address[] memory _approvedValidators,
+        address _biasValidator
     ) external;
 
     function jobs(

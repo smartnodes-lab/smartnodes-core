@@ -3,17 +3,19 @@ pragma solidity ^0.8.22;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
+import {ISmartnodesCoordinator} from "./interfaces/ISmartnodesCoordinator.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import {ERC20Votes} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
 import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title Smartnodes Payment and Governance Token
  * @dev Non-upgradeable ERC20 token for job payments and rewards with governance capabilities.
  * @dev Uses simple DAO-based access control system.
  */
-contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
+contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     /** Errors */
     error Token__InsufficientBalance();
     error Token__InvalidAddress();
@@ -32,6 +34,9 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
     error Token__ETHTransferFailed();
     error Token__OnlyDAO();
     error Token__DAOAlreadySet();
+    error Token__InvalidBiasValidator();
+    error Token__DistributionTooEarly();
+    error Token__InvalidInterval();
 
     struct LockedTokens {
         bool locked;
@@ -70,26 +75,31 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
     /** Constants */
     uint8 private constant VALIDATOR_REWARD_PERCENTAGE = 10;
     uint256 private constant INITIAL_EMISSION_RATE = 5832e18;
-    uint256 private constant TAIL_EMISSION = 512e18;
+    uint256 private constant TAIL_EMISSION = 420e18;
     uint256 private constant REWARD_PERIOD = 365 days;
     uint256 private constant UNLOCK_PERIOD = 14 days;
     uint256 private immutable i_deploymentTimestamp;
 
     /** State Variables */
     ISmartnodesCore public s_smartnodesCore;
+    ISmartnodesCoordinator public s_smartnodesCoordinator;
     bool public s_coreSet;
-
-    // Simple DAO access control
     address public s_dao;
     bool public s_daoSet;
 
     uint256 public s_currentDistributionId;
     uint256 public s_validatorLockAmount = 1_000_000e18;
     uint256 public s_userLockAmount = 100e18;
-
     PaymentAmounts public s_totalUnclaimed;
     PaymentAmounts public s_totalEscrowed;
     uint256 public s_totalLocked;
+
+    uint256 public s_distributionInterval = 24 hours;
+    uint256 public s_lastDistributionTime;
+
+    // ETH balance tracking
+    uint256 public s_totalETHDeposited;
+    uint256 public s_totalETHWithdrawn;
 
     mapping(uint256 => MerkleDistribution) public s_distributions;
     mapping(uint256 => mapping(address => bool)) public s_claimed;
@@ -130,7 +140,10 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
     event UnlockInitiated(address indexed user, uint256 unlockTime);
     event EthRewardsClaimed(address indexed user, uint256 amount);
     event TokenRewardsClaimed(address indexed user, uint256 amount);
-    event CoreContractSet(address indexed coreContract);
+    event SmartnodesSet(
+        address indexed coreContract,
+        address indexed coordinatorContract
+    );
     event DAOSet(address indexed dao);
     event ValidatorLockAmountUpdated(uint256 oldAmount, uint256 newAmount);
     event UserLockAmountUpdated(uint256 oldAmount, uint256 newAmount);
@@ -147,6 +160,9 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
         uint256 totalSno,
         uint256 totalEth
     );
+    event ETHDeposited(address indexed from, uint256 amount);
+    event ETHWithdrawn(address indexed to, uint256 amount);
+    event DistributionIntervalUpdated(uint256 oldInterval, uint256 newInterval);
 
     constructor(
         address[] memory _genesisNodes
@@ -158,11 +174,14 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
         // Mint initial tokens to genesis nodes
         uint256 gensisNodesLength = _genesisNodes.length;
         for (uint256 i = 0; i < gensisNodesLength; i++) {
-            _mint(_genesisNodes[i], s_validatorLockAmount * 2);
+            _mint(_genesisNodes[i], (s_validatorLockAmount * 2) / 1);
         }
     }
 
-    receive() external payable {}
+    receive() external payable {
+        s_totalETHDeposited += msg.value;
+        emit ETHDeposited(msg.sender, msg.value);
+    }
 
     // ============ DAO Setup ============
     /**
@@ -185,10 +204,14 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
 
     // ============ DAO-Controlled Functions ============
     /**
-     * @dev Sets the SmartnodesCore contract address. Can only be called by DAO.
+     * @dev Sets the Smartnodes contract addresses. Can only be called by DAO.
      * @param _smartnodesCore Address of the deployed SmartnodesCore contract
+     * @param _smartnodesCoordinator Address of the deployed SmartnodesCoordinator contract
      */
-    function setSmartnodesCore(address _smartnodesCore) external onlyDAO {
+    function setSmartnodes(
+        address _smartnodesCore,
+        address _smartnodesCoordinator
+    ) external onlyDAO {
         if (s_coreSet) {
             revert Token__CoreAlreadySet();
         }
@@ -197,9 +220,12 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
         }
 
         s_smartnodesCore = ISmartnodesCore(_smartnodesCore);
+        s_smartnodesCoordinator = ISmartnodesCoordinator(
+            _smartnodesCoordinator
+        );
         s_coreSet = true;
 
-        emit CoreContractSet(_smartnodesCore);
+        emit SmartnodesSet(_smartnodesCore, _smartnodesCoordinator);
     }
 
     /**
@@ -222,24 +248,52 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
         emit UserLockAmountUpdated(oldAmount, _newAmount);
     }
 
+    /**
+     * @notice Convenience function to halve the distribution interval
+     */
+    function halveDistributionInterval() external onlyDAO nonReentrant {
+        s_distributionInterval /= 2;
+        s_smartnodesCoordinator.updateTiming(s_distributionInterval);
+    }
+
+    /**
+     * @notice Convenience function to double the distribution interval
+     */
+    function doubleDistributionInterval() external onlyDAO nonReentrant {
+        s_distributionInterval *= 2;
+        s_smartnodesCoordinator.updateTiming(s_distributionInterval);
+    }
+
     // ============ Emissions & Halving ============
 
     /**
-     * @notice Distribute validator rewards with bias towards tx.origin
+     * @notice Distribute validator rewards with configurable bias validator
      * @param _approvedValidators List of validators that voted
      * @param _validatorReward Total reward amounts for validators
      * @param _distributionId Current distribution ID for events
-     * @dev 10% of validator rewards go to tx.origin, remaining 90% split equally among all validators
-     * @dev tx.origin receives both the bias amount and their equal share
+     * @param _biasValidator Address of validator to receive bias (replaces tx.origin)
+     * @dev 10% of validator rewards go to bias validator, remaining 90% split equally among all validators
+     * @dev Bias validator receives both the bias amount and their equal share
      */
     function _distributeValidatorRewards(
         address[] memory _approvedValidators,
         PaymentAmounts memory _validatorReward,
-        uint256 _distributionId
+        uint256 _distributionId,
+        address _biasValidator
     ) internal {
         uint8 _nValidators = uint8(_approvedValidators.length);
 
-        // Calculate bias amount (10% of total validator reward goes to tx.origin)
+        // Validate bias validator is in the approved list
+        bool biasValidatorFound = false;
+        for (uint256 i = 0; i < _nValidators; i++) {
+            if (_approvedValidators[i] == _biasValidator) {
+                biasValidatorFound = true;
+                break;
+            }
+        }
+        if (!biasValidatorFound) revert Token__InvalidBiasValidator();
+
+        // Calculate bias amount (10% of total validator reward goes to bias validator)
         uint256 snoBiasAmount = (uint256(_validatorReward.sno) * 10) / 100;
         uint256 ethBiasAmount = (uint256(_validatorReward.eth) * 10) / 100;
 
@@ -266,8 +320,8 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
             uint256 snoShare = snoPerValidator;
             uint256 ethShare = ethPerValidator;
 
-            // tx.origin gets the bias amount
-            if (validator == tx.origin) {
+            // Bias validator gets the bias amount
+            if (validator == _biasValidator) {
                 snoShare += snoBiasAmount;
                 ethShare += ethBiasAmount;
             }
@@ -300,12 +354,18 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
         uint256 snoAmount,
         uint256 ethAmount
     ) internal {
+        // Check ETH balance before transfer
+        if (ethAmount > 0 && address(this).balance < ethAmount) {
+            revert Token__InsufficientBalance();
+        }
+
         if (snoAmount > 0) {
             _mint(validator, snoAmount);
             emit TokenRewardsClaimed(validator, uint128(snoAmount));
         }
 
         if (ethAmount > 0) {
+            s_totalETHWithdrawn += ethAmount;
             (bool sent, ) = validator.call{value: ethAmount}("");
             if (!sent) revert Token__ETHTransferFailed();
             emit EthRewardsClaimed(validator, uint128(ethAmount));
@@ -318,25 +378,32 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
      * @param _totalCapacity Total capacity of contributed workers
      * @param _payments Additional payments to be added to the current emission rate
      * @param _approvedValidators List of validators that voted
+     * @param _biasValidator Address of validator to receive bias rewards
      * @dev Workers receive 90% of the total reward, validators receive 10%
-     * @dev Rewards are distributed with bias towards tx.origin validator, then proportionally to workers based on their capacities
+     * @dev Rewards are distributed with bias towards specified validator, then proportionally to workers based on their capacities
      * @dev This function is called by SmartnodesCore during state updates to distribute rewards.
      */
     function createMerkleDistribution(
         bytes32 _merkleRoot,
         uint256 _totalCapacity,
         address[] memory _approvedValidators,
-        PaymentAmounts calldata _payments
-    ) external onlySmartnodesCore {
+        PaymentAmounts calldata _payments,
+        address _biasValidator
+    ) external onlySmartnodesCore nonReentrant {
         uint8 _nValidators = uint8(_approvedValidators.length);
         if (_nValidators == 0) revert Token__InvalidValidatorLength();
-        if (!s_daoSet || s_dao == address(0)) revert Token__DAONotSet();
+        if (_biasValidator == address(0)) revert Token__InvalidBiasValidator();
 
         // Total rewards to be distributed
         PaymentAmounts memory totalReward = PaymentAmounts({
             sno: uint128(getEmissionRate() + _payments.sno),
             eth: _payments.eth
         });
+
+        // Check ETH balance before proceeding
+        if (totalReward.eth > 0 && address(this).balance < totalReward.eth) {
+            revert Token__InsufficientBalance();
+        }
 
         uint256 distributionId = ++s_currentDistributionId;
 
@@ -345,7 +412,8 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
             _distributeValidatorRewards(
                 _approvedValidators,
                 totalReward,
-                distributionId
+                distributionId,
+                _biasValidator
             );
             return; // exit early
         }
@@ -365,11 +433,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
             eth: totalReward.eth - validatorReward.eth
         });
 
-        // Update reward storage info (only validator + worker)
-        s_totalUnclaimed.sno += validatorReward.sno + workerReward.sno;
-        s_totalUnclaimed.eth += validatorReward.eth + workerReward.eth;
-
-        // Store merkle distribution
+        // Store merkle distribution (only worker rewards are stored for claiming)
         s_distributions[distributionId] = MerkleDistribution({
             merkleRoot: _merkleRoot,
             workerReward: workerReward,
@@ -377,6 +441,10 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
             active: true,
             timestamp: block.timestamp
         });
+
+        // Update total unclaimed (only worker rewards)
+        s_totalUnclaimed.sno += workerReward.sno;
+        s_totalUnclaimed.eth += workerReward.eth;
 
         emit MerkleDistributionCreated(
             distributionId,
@@ -386,30 +454,28 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
             block.timestamp
         );
 
-        // Update total unclaimed (subtract validator rewards since they're paid immediately)
-        s_totalUnclaimed.sno -= validatorReward.sno;
-        s_totalUnclaimed.eth -= validatorReward.eth;
-
-        // Distribute validator rewards with tx.origin bias
+        // Distribute validator rewards immediately with bias
         _distributeValidatorRewards(
             _approvedValidators,
             validatorReward,
-            distributionId
+            distributionId,
+            _biasValidator
         );
     }
 
     /**
-     * @notice Claim rewards from a Merkle distribution
+     * @notice Internal helper function to process a single reward claim
+     * @param _user Address of the user claiming rewards
      * @param _distributionId The ID of the distribution to claim from
-     * @param _capacity Worker capacity associate with rewards claim
+     * @param _capacity Worker capacity associated with rewards claim
      * @param _merkleProof Merkle proof validating the claim
-     * @dev Users can claim their rewards by providing a valid Merkle proof
      */
-    function claimMerkleRewards(
+    function _processClaim(
+        address _user,
         uint256 _distributionId,
         uint256 _capacity,
         bytes32[] calldata _merkleProof
-    ) external {
+    ) internal {
         MerkleDistribution memory distribution = s_distributions[
             _distributionId
         ];
@@ -418,18 +484,18 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
             revert Token__DistributionNotActive();
         }
 
-        if (s_claimed[_distributionId][msg.sender]) {
+        if (s_claimed[_distributionId][_user]) {
             revert Token__RewardsAlreadyClaimed();
         }
 
         // Verify Merkle proof
-        bytes32 leaf = keccak256(abi.encode(msg.sender, _capacity));
+        bytes32 leaf = keccak256(abi.encode(_user, _capacity));
         if (!MerkleProof.verify(_merkleProof, distribution.merkleRoot, leaf)) {
             revert Token__InvalidMerkleProof();
         }
 
         // Mark as claimed
-        s_claimed[_distributionId][msg.sender] = true;
+        s_claimed[_distributionId][_user] = true;
 
         uint128 eth;
         uint128 sno;
@@ -444,21 +510,73 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes {
             (distribution.workerReward.sno * _capacity) / totalWorkerCapacity
         );
 
+        // Check ETH balance before transfer
+        if (eth > 0 && address(this).balance < eth) {
+            revert Token__InsufficientBalance();
+        }
+
         // Update total unclaimed
         s_totalUnclaimed.eth -= eth;
         s_totalUnclaimed.sno -= sno;
 
         // Mint SNO tokens
-        _mint(msg.sender, sno);
-
-        // Transfer ETH
-        (bool sent, ) = msg.sender.call{value: eth}("");
-        if (!sent) {
-            revert Token__ETHTransferFailed();
+        if (sno > 0) {
+            _mint(_user, sno);
+            emit TokenRewardsClaimed(_user, sno);
         }
 
-        emit TokenRewardsClaimed(msg.sender, sno);
-        emit EthRewardsClaimed(msg.sender, eth);
+        // Transfer ETH
+        if (eth > 0) {
+            s_totalETHWithdrawn += eth;
+            (bool sent, ) = _user.call{value: eth}("");
+            if (!sent) {
+                revert Token__ETHTransferFailed();
+            }
+            emit EthRewardsClaimed(_user, eth);
+        }
+    }
+
+    /**
+     * @notice Claim rewards from a single Merkle distribution
+     * @param _distributionId The ID of the distribution to claim from
+     * @param _capacity Worker capacity associated with rewards claim
+     * @param _merkleProof Merkle proof validating the claim
+     * @dev Users can claim their rewards by providing a valid Merkle proof
+     */
+    function claimMerkleRewards(
+        uint256 _distributionId,
+        uint256 _capacity,
+        bytes32[] calldata _merkleProof
+    ) external nonReentrant {
+        _processClaim(msg.sender, _distributionId, _capacity, _merkleProof);
+    }
+
+    /**
+     * @notice Batch claim rewards from multiple Merkle distributions
+     * @param _distributionIds Array of distribution IDs to claim from
+     * @param _capacities Array of worker capacities associated with each claim
+     * @param _merkleProofs Array of merkle proofs validating each claim
+     * @dev All arrays must be the same length. Claims are processed in order.
+     */
+    function batchClaimMerkleRewards(
+        uint256[] calldata _distributionIds,
+        uint256[] calldata _capacities,
+        bytes32[][] calldata _merkleProofs
+    ) external nonReentrant {
+        uint256 length = _distributionIds.length;
+
+        if (length != _capacities.length || length != _merkleProofs.length) {
+            revert Token__InvalidAddress(); // Reusing existing error for array length mismatch
+        }
+
+        for (uint256 i = 0; i < length; i++) {
+            _processClaim(
+                msg.sender,
+                _distributionIds[i],
+                _capacities[i],
+                _merkleProofs[i]
+            );
+        }
     }
 
     /**
