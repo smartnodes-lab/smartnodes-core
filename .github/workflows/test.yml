@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Ensure we get the full history and all submodule commits
+          fetch-depth: 0
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -24,15 +26,42 @@ jobs:
         run: |
           forge --version
 
-      - name: Install dependencies
+      # Critical: Force update submodules to ensure they're fully initialized
+      - name: Initialize and update submodules
         run: |
-          forge install
-          forge remappings > remappings.txt
+          git submodule update --init --recursive --force
+          git submodule status
 
-      # - name: Run Forge fmt
-      #   run: |
-      #     forge fmt --check
-      #   id: fmt
+      # Verify the lib directory structure exists
+      - name: Verify dependencies
+        run: |
+          echo "=== Lib directory contents ==="
+          ls -la lib/ || echo "lib/ directory not found"
+          echo "=== forge-std contents ==="
+          ls -la lib/forge-std/ || echo "forge-std not found"
+          ls -la lib/forge-std/src/ || echo "forge-std/src not found"
+          echo "=== openzeppelin-contracts contents ==="
+          ls -la lib/openzeppelin-contracts/ || echo "openzeppelin-contracts not found"
+          ls -la lib/openzeppelin-contracts/contracts/ || echo "openzeppelin-contracts/contracts not found"
+
+      # If submodules are empty, try installing dependencies
+      - name: Install dependencies if missing
+        run: |
+          if [ ! -f "lib/forge-std/src/Test.sol" ]; then
+            echo "forge-std not found, installing..."
+            forge install foundry-rs/forge-std
+          fi
+          if [ ! -f "lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol" ]; then
+            echo "openzeppelin-contracts not found, installing..."
+            forge install OpenZeppelin/openzeppelin-contracts
+          fi
+
+      # Final verification before build
+      - name: Final dependency check
+        run: |
+          echo "=== Final verification ==="
+          ls -la lib/forge-std/src/Test.sol || echo "Test.sol missing"
+          ls -la lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol || echo "ERC20.sol missing"
 
       - name: Run Forge build
         run: |

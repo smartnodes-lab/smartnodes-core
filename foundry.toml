@@ -4,9 +4,8 @@ out = "out"
 libs = ["lib"]
 solc_version = "0.8.22"
 remappings = [
-    "@openzeppelin/=lib/openzeppelin-contracts/",
-    "foundry-huff/=lib/foundry-huff/src/",
-    "forge-std/=lib/forge-std/src/"
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
 ]
 via_ir = true
 optimizer = true
