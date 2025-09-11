@@ -210,9 +210,7 @@ contract SmartnodesDAO is ReentrancyGuard {
         // execute stored calls (revert if any call fails)
         uint256 len = p.targets.length;
         for (uint256 i = 0; i < len; ++i) {
-            (bool ok, bytes memory returndata) = p.targets[i].call{value: 0}(
-                p.calldatas[i]
-            );
+            (bool ok, ) = p.targets[i].call{value: 0}(p.calldatas[i]);
             if (!ok) {
                 // bubble up revert reason if present
                 revert SmartnodesDAO__ExecutionFailed(i);
