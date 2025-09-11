@@ -25,7 +25,9 @@ jobs:
           forge --version
 
       - name: Install dependencies
-        run: forge install
+        run: |
+          forge install
+          forge remappings > remappings.txt
 
       # - name: Run Forge fmt
       #   run: |
