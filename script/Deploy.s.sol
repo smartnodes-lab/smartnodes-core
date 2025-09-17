@@ -8,6 +8,8 @@ import {SmartnodesCoordinator} from "../src/SmartnodesCoordinator.sol";
 import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
 
 uint256 constant DAO_VOTING_PERIOD = 7 days;
+uint256 constant DEPLOYMENT_MULTIPLIER = 1;
+uint256 constant INTERVAL_SECONDS = 1 hours;
 
 contract Deploy is Script {
     address[] genesis;
@@ -19,17 +21,18 @@ contract Deploy is Script {
 
         vm.startBroadcast();
 
-        SmartnodesToken token = new SmartnodesToken(genesis);
+        SmartnodesToken token = new SmartnodesToken(
+            DEPLOYMENT_MULTIPLIER,
+            genesis
+        );
         SmartnodesDAO dao = new SmartnodesDAO(
             address(token),
-            DAO_VOTING_PERIOD
+            DAO_VOTING_PERIOD,
+            1000
         );
         SmartnodesCore core = new SmartnodesCore(address(token));
-
-        token.setDAO(address(dao));
-
         SmartnodesCoordinator coordinator = new SmartnodesCoordinator(
-            3600,
+            uint128(INTERVAL_SECONDS * DEPLOYMENT_MULTIPLIER),
             66,
             address(core),
             address(token),
@@ -37,6 +40,8 @@ contract Deploy is Script {
         );
 
         token.setSmartnodes(address(core), address(coordinator));
+
+        token.setDAO(address(dao));
         core.setCoordinator(address(coordinator));
 
         bytes32 publicKeyHash = vm.envBytes32("PUBLIC_KEY_HASH");

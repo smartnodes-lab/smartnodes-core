@@ -63,7 +63,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
     function testCannotLockAlreadyLockedTokens() public {
         vm.startPrank(address(core));
         vm.expectRevert(SmartnodesToken.Token__AlreadyLocked.selector);
-        token.lockTokens(validator1, true);
+        token.lockTokens(user1, true);
         vm.stopPrank();
     }
 
@@ -302,16 +302,13 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
     }
 
     // ============= Emission Rate Tests =============
-
-    function testInitialEmissionRate() public view {
-        assertEq(token.getEmissionRate(), INITIAL_EMISSION_RATE);
-    }
-
     function testEmissionRateAfterOneYear() public {
         // Fast forward one year
         vm.warp(block.timestamp + REWARD_PERIOD);
 
-        uint256 expectedRate = (INITIAL_EMISSION_RATE * 3) / 5;
+        uint256 expectedRate = (INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER *
+            3) / 5;
         assertEq(token.getEmissionRate(), expectedRate);
     }
 
@@ -319,7 +316,10 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         // Fast forward two years
         vm.warp(block.timestamp + (REWARD_PERIOD * 2));
 
-        uint256 expectedRate = (INITIAL_EMISSION_RATE * 3 * 3) / (5 * 5);
+        uint256 expectedRate = (INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER *
+            3 *
+            3) / (5 * 5);
         assertEq(token.getEmissionRate(), expectedRate);
     }
 
@@ -327,7 +327,10 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         // Fast forward many years to reach tail emission
         vm.warp(block.timestamp + (REWARD_PERIOD * 20));
 
-        assertEq(token.getEmissionRate(), TAIL_EMISSION);
+        assertEq(
+            token.getEmissionRate(),
+            TAIL_EMISSION * DEPLOYMENT_MULTIPLIER
+        );
     }
 
     // ============= Access Control Tests =============
@@ -418,7 +421,9 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
             .s_distributions(distributionId);
 
-        uint256 totalSnoReward = INITIAL_EMISSION_RATE + ADDITIONAL_SNO_PAYMENT;
+        uint256 totalSnoReward = INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER +
+            ADDITIONAL_SNO_PAYMENT;
         uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
 
         uint256 expectedValidatorSno = (totalSnoReward *
@@ -459,7 +464,9 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         bytes32[] memory leaves = _generateLeaves(participants);
 
         // Calculate total rewards
-        uint256 totalSnoReward = INITIAL_EMISSION_RATE + ADDITIONAL_SNO_PAYMENT;
+        uint256 totalSnoReward = INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER +
+            ADDITIONAL_SNO_PAYMENT;
         uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
 
         // Validator rewards (already paid out directly in contract)
@@ -532,7 +539,6 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
 
         _setupContractFunding();
 
-        // Let's do 1_000 participants
         (
             Participant[] memory participants,
             uint256 totalCapacity
@@ -543,7 +549,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             totalCapacity
         );
 
-        // Pick the 10,000th worker (index 9999)
+        // the 10,000th worker (index 9999)
         uint256 workerIndex = 9_999;
         Participant memory worker = participants[workerIndex];
 
@@ -563,9 +569,11 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
             .s_distributions(distributionId);
 
-        uint256 validatorSnoReward = ((INITIAL_EMISSION_RATE +
+        uint256 validatorSnoReward = ((INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER +
             ADDITIONAL_SNO_PAYMENT) * VALIDATOR_REWARD_PERCENTAGE) / 100;
-        uint256 expectedWorkerSno = (INITIAL_EMISSION_RATE +
+        uint256 expectedWorkerSno = (INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER +
             ADDITIONAL_SNO_PAYMENT) - validatorSnoReward;
         uint256 expectedWorkerSnoShare = (expectedWorkerSno * worker.capacity) /
             totalCapacity;

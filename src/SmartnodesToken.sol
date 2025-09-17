@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity 0.8.22;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
@@ -11,9 +11,13 @@ import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
- * @title Smartnodes Payment and Governance Token
- * @dev Non-upgradeable ERC20 token for job payments and rewards with governance capabilities.
- * @dev Uses simple DAO-based access control system.
+ * @title Payment and Governance Token for the Smartnodes Network
+ * @dev Non-upgradeable ERC20 token for job payments, node rewards, and node collateral.
+ * @dev Rewards are distributed perioidcally by the SmartnodesCore and SmartnodesCoordinator.
+ * @dev Rewards can be claimed bu
+ * @dev Reward distribution undergoes yearly 40% reductions until a tail emission is reached.
+ * @dev Uses simple DAO-based access control system to control staking requirements and upgrades
+ * @dev to SmartnodesCore and SmartnodesCoordinator.
  */
 contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     /** Errors */
@@ -38,23 +42,17 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     error Token__DistributionTooEarly();
     error Token__InvalidInterval();
 
+    // Token lock struct for both validators and users
     struct LockedTokens {
         bool locked;
         bool isValidator;
         uint128 unlockTime;
     }
 
+    // Job payments and rewards can be SNO or ETH
     struct PaymentAmounts {
         uint128 sno;
         uint128 eth;
-    }
-
-    struct SupplyBreakdown {
-        uint256 totalSupply;
-        uint256 circulating;
-        uint256 locked;
-        uint256 unclaimed;
-        uint256 escrowed;
     }
 
     struct EthBreakdown {
@@ -74,11 +72,14 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
 
     /** Constants */
     uint8 private constant VALIDATOR_REWARD_PERCENTAGE = 10;
-    uint256 private constant INITIAL_EMISSION_RATE = 5832e18;
-    uint256 private constant TAIL_EMISSION = 420e18;
+    uint256 private constant BASE_EMISSION_RATE = 5832e18; // Base hourly emission rate
+    uint256 private constant TAIL_EMISSION = 420e18; // Base hourly tail emission
     uint256 private constant REWARD_PERIOD = 365 days;
     uint256 private constant UNLOCK_PERIOD = 14 days;
+    uint256 private constant BASE_INTERVAL = 1 hours; // Base interval for emission calculation
+
     uint256 private immutable i_deploymentTimestamp;
+    uint256 private immutable i_emissionMultiplier;
 
     /** State Variables */
     ISmartnodesCore public s_smartnodesCore;
@@ -87,14 +88,16 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     address public s_dao;
     bool public s_daoSet;
 
+    // Initial lock requirements
+    uint256 public s_validatorLockAmount;
+    uint256 public s_userLockAmount;
+
     uint256 public s_currentDistributionId;
-    uint256 public s_validatorLockAmount = 1_000_000e18;
-    uint256 public s_userLockAmount = 100e18;
     PaymentAmounts public s_totalUnclaimed;
     PaymentAmounts public s_totalEscrowed;
     uint256 public s_totalLocked;
 
-    uint256 public s_distributionInterval = 24 hours;
+    uint256 public s_distributionInterval;
     uint256 public s_lastDistributionTime;
 
     // ETH balance tracking
@@ -165,16 +168,23 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     event DistributionIntervalUpdated(uint256 oldInterval, uint256 newInterval);
 
     constructor(
+        uint256 emissionMultiplier,
         address[] memory _genesisNodes
     ) ERC20("SmartnodesToken", "SNO") ERC20Permit("SmartnodesToken") {
         i_deploymentTimestamp = block.timestamp;
+        i_emissionMultiplier = emissionMultiplier;
         s_coreSet = false;
         s_daoSet = false;
+
+        // Set initial distribution interval based on emission multiplier
+        s_distributionInterval = BASE_INTERVAL * emissionMultiplier;
+        s_validatorLockAmount = 1_000_000e18;
+        s_userLockAmount = 100e18;
 
         // Mint initial tokens to genesis nodes
         uint256 gensisNodesLength = _genesisNodes.length;
         for (uint256 i = 0; i < gensisNodesLength; i++) {
-            _mint(_genesisNodes[i], (s_validatorLockAmount * 2) / 1);
+            _mint(_genesisNodes[i], (s_validatorLockAmount * 4) / 2);
         }
     }
 
@@ -593,10 +603,10 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      * @return The current emission rate
      */
     function _emissionForEra(uint256 era) internal pure returns (uint256) {
-        if (era == 0) return INITIAL_EMISSION_RATE;
+        if (era == 0) return BASE_EMISSION_RATE;
 
         // initial * (0.6)^era
-        uint256 emission = INITIAL_EMISSION_RATE;
+        uint256 emission = BASE_EMISSION_RATE;
         for (uint256 i = 0; i < era; i++) {
             emission = (emission * 6000) / 10000;
             if (emission <= TAIL_EMISSION) return TAIL_EMISSION;
@@ -610,7 +620,9 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      * @return Current emission rate for this era
      */
     function getEmissionRate() public view returns (uint256) {
-        return _emissionForEra(_currentEra());
+        uint256 era = _currentEra();
+        uint256 baseEmission = _emissionForEra(era);
+        return (baseEmission * s_distributionInterval) / BASE_INTERVAL;
     }
 
     /**
@@ -837,20 +849,28 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     function getSupplyBreakdown()
         external
         view
-        returns (SupplyBreakdown memory)
+        returns (
+            uint256 _totalSupply,
+            uint256 _circulating,
+            uint256 _locked,
+            uint256 _unclaimed,
+            uint256 _escrowed,
+            uint256 _stateTime,
+            uint256 _stateReward
+        )
     {
         uint256 total = totalSupply();
-        return
-            SupplyBreakdown({
-                totalSupply: total,
-                circulating: total -
-                    s_totalLocked -
-                    s_totalUnclaimed.sno -
-                    s_totalEscrowed.sno,
-                locked: s_totalLocked,
-                unclaimed: s_totalUnclaimed.sno,
-                escrowed: s_totalEscrowed.sno
-            });
+        uint256 reward = getEmissionRate();
+
+        return (
+            total,
+            total - s_totalLocked - s_totalUnclaimed.sno - s_totalEscrowed.sno,
+            s_totalLocked,
+            s_totalUnclaimed.sno,
+            s_totalEscrowed.sno,
+            s_distributionInterval,
+            reward
+        );
     }
 
     /**

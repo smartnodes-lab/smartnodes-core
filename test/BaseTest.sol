@@ -12,6 +12,8 @@ import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
  * @notice Base test contract with common setup for all Smartnodes tests
  */
 abstract contract BaseSmartnodesTest is Test {
+    uint256 constant DEPLOYMENT_MULTIPLIER = 1;
+    uint128 constant INTERVAL_SECONDS = 1 minutes;
     uint256 constant VALIDATOR_REWARD_PERCENTAGE = 10;
     uint256 constant ADDITIONAL_SNO_PAYMENT = 1000e18;
     uint256 constant ADDITIONAL_ETH_PAYMENT = 5 ether;
@@ -55,6 +57,7 @@ abstract contract BaseSmartnodesTest is Test {
     bytes32 constant USER2_PUBKEY = keccak256("user2_pubkey");
     bytes32 constant VALIDATOR1_PUBKEY = keccak256("validator1_pubkey");
     bytes32 constant VALIDATOR2_PUBKEY = keccak256("validator2_pubkey");
+    bytes32 constant VALIDATOR3_PUBKEY = keccak256("validator3_pubkey");
     bytes32 constant JOB_ID_1 = keccak256("job1");
     bytes32 constant JOB_ID_2 = keccak256("job2");
 
@@ -76,13 +79,13 @@ abstract contract BaseSmartnodesTest is Test {
         // genesisNodes.push(worker2);
         // genesisNodes.push(worker3);
 
-        token = new SmartnodesToken(genesisNodes);
-        dao = new SmartnodesDAO(address(token), DAO_VOTING_PERIOD);
+        token = new SmartnodesToken(DEPLOYMENT_MULTIPLIER, genesisNodes);
+        dao = new SmartnodesDAO(address(token), DAO_VOTING_PERIOD, 500);
         core = new SmartnodesCore(address(token));
 
         // Deploy coordinator
         coordinator = new SmartnodesCoordinator(
-            3600,
+            INTERVAL_SECONDS,
             66,
             address(core),
             address(token),
@@ -121,7 +124,6 @@ abstract contract BaseSmartnodesTest is Test {
         bytes[] memory calldatas,
         string memory description
     ) internal returns (uint256 proposalId) {
-        vm.prank(deployerAddr);
         proposalId = dao.propose(targets, calldatas, description);
     }
 
@@ -133,15 +135,16 @@ abstract contract BaseSmartnodesTest is Test {
         bool support
     ) internal {
         vm.startPrank(voter);
-        uint256 tokensNeeded = votes * votes;
-        token.approve(address(dao), tokensNeeded);
-        dao.vote(proposalId, votes, support);
+        token.approve(address(dao), votes);
+        dao.vote(proposalId, support, votes);
         vm.stopPrank();
     }
 
     // Helper function to execute DAO proposals in tests
     function executeProposal(uint256 proposalId) internal {
         vm.warp(block.timestamp + DAO_VOTING_PERIOD + 1);
+        dao.queue(proposalId);
+        vm.warp(block.timestamp + dao.TIMELOCK_DELAY());
         dao.execute(proposalId);
     }
 
