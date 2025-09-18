@@ -2,12 +2,12 @@
 pragma solidity ^0.8.22;
 
 import {console} from "forge-std/Test.sol";
-import {SmartnodesToken} from "../src/SmartnodesToken.sol";
+import {SmartnodesERC20} from "../src/SmartnodesERC20.sol";
 import {BaseSmartnodesTest} from "./BaseTest.sol";
 
 /**
  * @title SmartnodesTokenTest
- * @notice Comprehensive tests for SmartnodesToken contract functionality
+ * @notice Comprehensive tests for SmartnodesERC20 contract functionality
  */
 contract SmartnodesTokenTest is BaseSmartnodesTest {
     function _setupInitialState() internal override {
@@ -55,20 +55,20 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         assertEq(token.balanceOf(user3), 0, "user3 should start with 0 tokens");
 
         // User 3 doesnt have any tokens, should revert
-        vm.expectRevert(SmartnodesToken.Token__InsufficientBalance.selector);
+        vm.expectRevert(SmartnodesERC20.Token__InsufficientBalance.selector);
         vm.prank(address(core));
         token.lockTokens(user3, false);
     }
 
     function testCannotLockAlreadyLockedTokens() public {
         vm.startPrank(address(core));
-        vm.expectRevert(SmartnodesToken.Token__AlreadyLocked.selector);
+        vm.expectRevert(SmartnodesERC20.Token__AlreadyLocked.selector);
         token.lockTokens(user1, true);
         vm.stopPrank();
     }
 
     function testCannotLockFromNonCore() public {
-        vm.expectRevert(SmartnodesToken.Token__InvalidAddress.selector);
+        vm.expectRevert(SmartnodesERC20.Token__InvalidAddress.selector);
         vm.prank(validator1);
         token.lockTokens(validator2, true);
     }
@@ -120,14 +120,14 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         token.unlockTokens(validator1);
 
         // Try to complete unlock before period
-        vm.expectRevert(SmartnodesToken.Token__UnlockPending.selector);
+        vm.expectRevert(SmartnodesERC20.Token__UnlockPending.selector);
         token.unlockTokens(validator1);
         vm.stopPrank();
     }
 
     function testCannotUnlockNeverLocked() public {
         vm.prank(address(core));
-        vm.expectRevert(SmartnodesToken.Token__NotLocked.selector);
+        vm.expectRevert(SmartnodesERC20.Token__NotLocked.selector);
         token.unlockTokens(user3);
     }
 
@@ -152,7 +152,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             initialContractBalance + paymentAmount
         );
 
-        SmartnodesToken.PaymentAmounts memory escrowed = token
+        SmartnodesERC20.PaymentAmounts memory escrowed = token
             .getEscrowedPayments(user1);
         assertEq(escrowed.sno, paymentAmount);
     }
@@ -164,7 +164,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         vm.prank(address(core));
         token.escrowEthPayment{value: paymentAmount}(user1, paymentAmount);
 
-        SmartnodesToken.PaymentAmounts memory escrowed = token
+        SmartnodesERC20.PaymentAmounts memory escrowed = token
             .getEscrowedPayments(user1);
         assertEq(escrowed.eth, paymentAmount);
         assertEq(address(token).balance, paymentAmount);
@@ -184,7 +184,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         vm.prank(address(core));
         token.releaseEscrowedPayment(user1, paymentAmount);
 
-        SmartnodesToken.PaymentAmounts memory escrowed = token
+        SmartnodesERC20.PaymentAmounts memory escrowed = token
             .getEscrowedPayments(user1);
         assertEq(escrowed.sno, 0);
     }
@@ -201,7 +201,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         vm.prank(address(core));
         token.releaseEscrowedEthPayment(user1, paymentAmount);
 
-        SmartnodesToken.PaymentAmounts memory escrowed = token
+        SmartnodesERC20.PaymentAmounts memory escrowed = token
             .getEscrowedPayments(user1);
         assertEq(escrowed.eth, 0);
         assertEq(address(token).balance, paymentAmount); // ETH stays in contract
@@ -291,7 +291,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         );
 
         // Get stored reward amounts
-        (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
+        (, SmartnodesERC20.PaymentAmounts memory workerReward, , , ) = token
             .s_distributions(distributionId);
 
         // Calculate expected totals
@@ -336,15 +336,15 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
     // ============= Access Control Tests =============
 
     function testOnlyCoreCanCallProtectedFunctions() public {
-        vm.expectRevert(SmartnodesToken.Token__InvalidAddress.selector);
+        vm.expectRevert(SmartnodesERC20.Token__InvalidAddress.selector);
         vm.prank(validator1);
         token.lockTokens(validator2, true);
 
-        vm.expectRevert(SmartnodesToken.Token__InvalidAddress.selector);
+        vm.expectRevert(SmartnodesERC20.Token__InvalidAddress.selector);
         vm.prank(validator1);
         token.unlockTokens(validator1);
 
-        vm.expectRevert(SmartnodesToken.Token__InvalidAddress.selector);
+        vm.expectRevert(SmartnodesERC20.Token__InvalidAddress.selector);
         vm.prank(validator1);
         token.escrowPayment(user1, 1000e18);
     }
@@ -368,8 +368,8 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         console.log("Merkle root:", vm.toString(merkleRoot));
 
         // Create distribution
-        SmartnodesToken.PaymentAmounts
-            memory additionalPayments = SmartnodesToken.PaymentAmounts({
+        SmartnodesERC20.PaymentAmounts
+            memory additionalPayments = SmartnodesERC20.PaymentAmounts({
                 sno: uint128(ADDITIONAL_SNO_PAYMENT),
                 eth: uint128(ADDITIONAL_ETH_PAYMENT)
             });
@@ -399,7 +399,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         // Validate distribution storage
         (
             bytes32 storedRoot,
-            SmartnodesToken.PaymentAmounts memory workerReward,
+            SmartnodesERC20.PaymentAmounts memory workerReward,
             uint256 storedCapacity,
             bool active,
             uint256 timestamp
@@ -418,7 +418,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
      * @param distributionId The distribution to validate
      */
     function _validateRewardCalculations(uint256 distributionId) internal view {
-        (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
+        (, SmartnodesERC20.PaymentAmounts memory workerReward, , , ) = token
             .s_distributions(distributionId);
 
         uint256 totalSnoReward = INITIAL_EMISSION_RATE *
@@ -430,8 +430,14 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             VALIDATOR_REWARD_PERCENTAGE) / 100;
         uint256 expectedValidatorEth = (totalEthReward *
             VALIDATOR_REWARD_PERCENTAGE) / 100;
-        uint256 expectedWorkerSno = totalSnoReward - expectedValidatorSno;
-        uint256 expectedWorkerEth = totalEthReward - expectedValidatorEth;
+        uint256 expectedDaoSno = (totalSnoReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedDaoEth = (totalEthReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedWorkerSno = totalSnoReward -
+            expectedValidatorSno -
+            expectedDaoSno;
+        uint256 expectedWorkerEth = totalEthReward -
+            expectedValidatorEth -
+            expectedDaoEth;
 
         assertEq(
             workerReward.sno,
@@ -469,15 +475,18 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             ADDITIONAL_SNO_PAYMENT;
         uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
 
-        // Validator rewards (already paid out directly in contract)
-        uint256 validatorSnoReward = (totalSnoReward *
+        uint256 expectedValidatorSno = (totalSnoReward *
             VALIDATOR_REWARD_PERCENTAGE) / 100;
-        uint256 validatorEthReward = (totalEthReward *
+        uint256 expectedValidatorEth = (totalEthReward *
             VALIDATOR_REWARD_PERCENTAGE) / 100;
-
-        // Worker reward pools
-        uint256 expectedWorkerSno = totalSnoReward - validatorSnoReward;
-        uint256 expectedWorkerEth = totalEthReward - validatorEthReward;
+        uint256 expectedDaoSno = (totalSnoReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedDaoEth = (totalEthReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedWorkerSno = totalSnoReward -
+            expectedValidatorSno -
+            expectedDaoSno;
+        uint256 expectedWorkerEth = totalEthReward -
+            expectedValidatorEth -
+            expectedDaoEth;
 
         uint256 totalCapacity = 0;
         for (uint256 i = 0; i < participants.length; i++) {
@@ -559,22 +568,25 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
 
         // Pre-claim balances
         uint256 preClaimBalance = token.balanceOf(worker.addr);
-        uint256 preClaimEth = worker.addr.balance;
 
         // Claim rewards
         vm.prank(worker.addr);
         token.claimMerkleRewards(distributionId, worker.capacity, proof);
 
-        // Calculate expected rewards
-        (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
-            .s_distributions(distributionId);
-
         uint256 validatorSnoReward = ((INITIAL_EMISSION_RATE *
             DEPLOYMENT_MULTIPLIER +
             ADDITIONAL_SNO_PAYMENT) * VALIDATOR_REWARD_PERCENTAGE) / 100;
+
+        uint256 daoSnoReward = ((INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER +
+            ADDITIONAL_SNO_PAYMENT) * DAO_REWARD_PERCENTAGE) / 100;
+
         uint256 expectedWorkerSno = (INITIAL_EMISSION_RATE *
             DEPLOYMENT_MULTIPLIER +
-            ADDITIONAL_SNO_PAYMENT) - validatorSnoReward;
+            ADDITIONAL_SNO_PAYMENT) -
+            validatorSnoReward -
+            daoSnoReward;
+
         uint256 expectedWorkerSnoShare = (expectedWorkerSno * worker.capacity) /
             totalCapacity;
 

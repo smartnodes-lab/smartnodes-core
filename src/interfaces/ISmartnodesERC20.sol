@@ -7,10 +7,10 @@ struct PaymentAmounts {
 }
 
 /**
- * @title ISmartnodesToken Interface
+ * @title ISmartnodesERC20 Interface
  * @dev Interface for the SmartnodesToken contract
  */
-interface ISmartnodesToken {
+interface ISmartnodesERC20 {
     function setValidatorLockAmount(uint256 _newAmount) external;
 
     function setUserLockAmount(uint256 _newAmount) external;

@@ -3,7 +3,7 @@ pragma solidity ^0.8.22;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
-import {ISmartnodesToken} from "./interfaces/ISmartnodesToken.sol";
+import {ISmartnodesERC20} from "./interfaces/ISmartnodesERC20.sol";
 
 /**
  * @title SmartnodesCoordinator
@@ -31,7 +31,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     // ============= State Variables ==============
     ISmartnodesCore private immutable i_smartnodesCore;
-    ISmartnodesToken private immutable i_smartnodesToken;
+    ISmartnodesERC20 private immutable i_smartnodesToken;
     uint8 private immutable i_requiredApprovalsPercentage;
 
     // Packed time-related variables
@@ -134,7 +134,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         }
 
         i_smartnodesCore = ISmartnodesCore(_smartnodesCore);
-        i_smartnodesToken = ISmartnodesToken(_smartnodesToken);
+        i_smartnodesToken = ISmartnodesERC20(_smartnodesToken);
         i_requiredApprovalsPercentage = _requiredApprovalsPercentage;
 
         timeConfig = TimeConfig({
@@ -269,7 +269,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         // Verify proposal data integrity
         bytes32 computedHash = _computeProposalHash(
-            proposalId,
             merkleRoot,
             validatorsToRemove,
             jobHashes,
@@ -557,7 +556,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     }
 
     function _computeProposalHash(
-        uint8 proposalId,
         bytes32 merkleRoot,
         address[] calldata validatorsToRemove,
         bytes32[] calldata jobHashes,
@@ -567,7 +565,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         return
             keccak256(
                 abi.encode(
-                    proposalId,
                     merkleRoot,
                     validatorsToRemove,
                     jobHashes,

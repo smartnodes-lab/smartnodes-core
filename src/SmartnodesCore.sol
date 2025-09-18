@@ -2,7 +2,7 @@
 pragma solidity ^0.8.22;
 
 import {ISmartnodesCoordinator} from "./interfaces/ISmartnodesCoordinator.sol";
-import {ISmartnodesToken, PaymentAmounts} from "./interfaces/ISmartnodesToken.sol";
+import {ISmartnodesERC20, PaymentAmounts} from "./interfaces/ISmartnodesERC20.sol";
 
 /**
  * @title SmartnodesCore - Job Management System for Secure, Incentivised, Multi-Network P2P Resource Sharing
@@ -55,7 +55,7 @@ contract SmartnodesCore {
     /** Constants */
     uint24 private constant UNLOCK_PERIOD = 14 days;
 
-    ISmartnodesToken private immutable i_tokenContract;
+    ISmartnodesERC20 private immutable i_tokenContract;
 
     /** State Variables */
     ISmartnodesCoordinator private validatorContract;
@@ -83,7 +83,7 @@ contract SmartnodesCore {
     }
 
     constructor(address _tokenContract) {
-        i_tokenContract = ISmartnodesToken(_tokenContract);
+        i_tokenContract = ISmartnodesERC20(_tokenContract);
         jobCounter = 0;
     }
 

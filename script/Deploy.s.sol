@@ -3,7 +3,7 @@ pragma solidity ^0.8.22;
 
 import {Script, console} from "forge-std/Script.sol";
 import {SmartnodesCore} from "../src/SmartnodesCore.sol";
-import {SmartnodesToken} from "../src/SmartnodesToken.sol";
+import {SmartnodesERC20} from "../src/SmartnodesERC20.sol";
 import {SmartnodesCoordinator} from "../src/SmartnodesCoordinator.sol";
 import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
 
@@ -21,7 +21,7 @@ contract Deploy is Script {
 
         vm.startBroadcast();
 
-        SmartnodesToken token = new SmartnodesToken(
+        SmartnodesERC20 token = new SmartnodesERC20(
             DEPLOYMENT_MULTIPLIER,
             genesis
         );

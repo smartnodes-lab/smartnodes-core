@@ -2,7 +2,7 @@
 pragma solidity ^0.8.22;
 
 import {Test, console} from "forge-std/Test.sol";
-import {SmartnodesToken} from "../src/SmartnodesToken.sol";
+import {SmartnodesERC20} from "../src/SmartnodesERC20.sol";
 import {SmartnodesCore} from "../src/SmartnodesCore.sol";
 import {SmartnodesCoordinator} from "../src/SmartnodesCoordinator.sol";
 import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
@@ -15,6 +15,7 @@ abstract contract BaseSmartnodesTest is Test {
     uint256 constant DEPLOYMENT_MULTIPLIER = 1;
     uint128 constant INTERVAL_SECONDS = 1 minutes;
     uint256 constant VALIDATOR_REWARD_PERCENTAGE = 10;
+    uint256 constant DAO_REWARD_PERCENTAGE = 3;
     uint256 constant ADDITIONAL_SNO_PAYMENT = 1000e18;
     uint256 constant ADDITIONAL_ETH_PAYMENT = 5 ether;
     uint256 constant INITIAL_EMISSION_RATE = 5832e18;
@@ -33,7 +34,7 @@ abstract contract BaseSmartnodesTest is Test {
     }
 
     // Contract instances
-    SmartnodesToken public token;
+    SmartnodesERC20 public token;
     SmartnodesCore public core;
     SmartnodesCoordinator public coordinator;
     SmartnodesDAO public dao;
@@ -79,7 +80,7 @@ abstract contract BaseSmartnodesTest is Test {
         // genesisNodes.push(worker2);
         // genesisNodes.push(worker3);
 
-        token = new SmartnodesToken(DEPLOYMENT_MULTIPLIER, genesisNodes);
+        token = new SmartnodesERC20(DEPLOYMENT_MULTIPLIER, genesisNodes);
         dao = new SmartnodesDAO(address(token), DAO_VOTING_PERIOD, 500);
         core = new SmartnodesCore(address(token));
 
@@ -122,9 +123,10 @@ abstract contract BaseSmartnodesTest is Test {
     function createDAOProposal(
         address[] memory targets,
         bytes[] memory calldatas,
+        uint256[] memory values,
         string memory description
     ) internal returns (uint256 proposalId) {
-        proposalId = dao.propose(targets, calldatas, description);
+        proposalId = dao.propose(targets, calldatas, values, description);
     }
 
     // Helper function to vote on DAO proposals in tests
