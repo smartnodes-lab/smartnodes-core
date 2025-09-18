@@ -38,7 +38,6 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     error Token__ETHTransferFailed();
     error Token__OnlyDAO();
     error Token__DAOAlreadySet();
-    error Token__InvalidBiasValidator();
     error Token__DistributionTooEarly();
     error Token__InvalidInterval();
 
@@ -277,50 +276,30 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     // ============ Emissions & Halving ============
 
     /**
-     * @notice Distribute validator rewards with configurable bias validator
+     * @notice Distribute validator rewards
      * @param _approvedValidators List of validators that voted
      * @param _validatorReward Total reward amounts for validators
      * @param _distributionId Current distribution ID for events
-     * @param _biasValidator Address of validator to receive bias (replaces tx.origin)
-     * @dev 10% of validator rewards go to bias validator, remaining 90% split equally among all validators
-     * @dev Bias validator receives both the bias amount and their equal share
+     * @param _dustValidator Validator that gets the scraps (proposal creator)
      */
     function _distributeValidatorRewards(
         address[] memory _approvedValidators,
         PaymentAmounts memory _validatorReward,
         uint256 _distributionId,
-        address _biasValidator
+        address _dustValidator
     ) internal {
         uint8 _nValidators = uint8(_approvedValidators.length);
 
-        // Validate bias validator is in the approved list
-        bool biasValidatorFound = false;
-        for (uint256 i = 0; i < _nValidators; i++) {
-            if (_approvedValidators[i] == _biasValidator) {
-                biasValidatorFound = true;
-                break;
-            }
-        }
-        if (!biasValidatorFound) revert Token__InvalidBiasValidator();
+        // Remaining pool to be split equally among validators
+        uint256 snoPool = uint256(_validatorReward.sno);
+        uint256 ethPool = uint256(_validatorReward.eth);
 
-        // Calculate bias amount (10% of total validator reward goes to bias validator)
-        uint256 snoBiasAmount = (uint256(_validatorReward.sno) * 10) / 100;
-        uint256 ethBiasAmount = (uint256(_validatorReward.eth) * 10) / 100;
-
-        // Remaining 90% to be split equally among all validators
-        uint256 snoRemainingPool = uint256(_validatorReward.sno) -
-            snoBiasAmount;
-        uint256 ethRemainingPool = uint256(_validatorReward.eth) -
-            ethBiasAmount;
-
-        uint256 snoPerValidator = snoRemainingPool / _nValidators;
-        uint256 ethPerValidator = ethRemainingPool / _nValidators;
+        uint256 snoPerValidator = snoPool / _nValidators;
+        uint256 ethPerValidator = ethPool / _nValidators;
 
         // Handle dust/remainder
-        uint256 snoRemainder = snoRemainingPool -
-            (snoPerValidator * _nValidators);
-        uint256 ethRemainder = ethRemainingPool -
-            (ethPerValidator * _nValidators);
+        uint256 snoRemainder = snoPool - (snoPerValidator * _nValidators);
+        uint256 ethRemainder = ethPool - (ethPerValidator * _nValidators);
 
         // Distribute to validators
         for (uint256 i = 0; i < _nValidators; i++) {
@@ -330,14 +309,8 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
             uint256 snoShare = snoPerValidator;
             uint256 ethShare = ethPerValidator;
 
-            // Bias validator gets the bias amount
-            if (validator == _biasValidator) {
-                snoShare += snoBiasAmount;
-                ethShare += ethBiasAmount;
-            }
-
-            // First validator gets remainder to avoid dust
-            if (i == 0) {
+            // Give dust to first validator to avoid lost remainder
+            if (_dustValidator == validator) {
                 snoShare += snoRemainder;
                 ethShare += ethRemainder;
             }
@@ -388,7 +361,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      * @param _totalCapacity Total capacity of contributed workers
      * @param _payments Additional payments to be added to the current emission rate
      * @param _approvedValidators List of validators that voted
-     * @param _biasValidator Address of validator to receive bias rewards
+     * @param _dustValidator Address of validator to receive dust rewards (usually the proposal executor)
      * @dev Workers receive 90% of the total reward, validators receive 10%
      * @dev Rewards are distributed with bias towards specified validator, then proportionally to workers based on their capacities
      * @dev This function is called by SmartnodesCore during state updates to distribute rewards.
@@ -398,11 +371,10 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         uint256 _totalCapacity,
         address[] memory _approvedValidators,
         PaymentAmounts calldata _payments,
-        address _biasValidator
+        address _dustValidator
     ) external onlySmartnodesCore nonReentrant {
         uint8 _nValidators = uint8(_approvedValidators.length);
         if (_nValidators == 0) revert Token__InvalidValidatorLength();
-        if (_biasValidator == address(0)) revert Token__InvalidBiasValidator();
 
         // Total rewards to be distributed
         PaymentAmounts memory totalReward = PaymentAmounts({
@@ -423,7 +395,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
                 _approvedValidators,
                 totalReward,
                 distributionId,
-                _biasValidator
+                _dustValidator
             );
             return; // exit early
         }
@@ -469,7 +441,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
             _approvedValidators,
             validatorReward,
             distributionId,
-            _biasValidator
+            _dustValidator
         );
     }
 
@@ -812,7 +784,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      * @param _user The address of the user whose escrowed ETH payment is being released
      * @param _amount The amount of escrowed ETH payment to be released
      * @dev This releases the escrowed ETH to be available for distribution as rewards
-     * @dev The ETH stays in the contract but is no longer considered "escrowed"
+     * @dev The ETH stays in the contract but is no longer considered escrowed
      */
     function releaseEscrowedEthPayment(
         address _user,
@@ -896,7 +868,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         return address(s_smartnodesCore);
     }
 
-    // ============ ERC20Votes Overrides ============
+    // ============ Required Overrides ============
 
     /**
      * @dev Override to prevent voting with locked tokens
@@ -921,8 +893,6 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
 
         return balance;
     }
-
-    // ============ Required Overrides ============
 
     /**
      * @dev Override required by Solidity for multiple inheritance

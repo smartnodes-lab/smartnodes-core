@@ -269,7 +269,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         // Verify proposal data integrity
         bytes32 computedHash = _computeProposalHash(
-            proposalId,
             merkleRoot,
             validatorsToRemove,
             jobHashes,
@@ -557,7 +556,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     }
 
     function _computeProposalHash(
-        uint8 proposalId,
         bytes32 merkleRoot,
         address[] calldata validatorsToRemove,
         bytes32[] calldata jobHashes,
@@ -567,7 +565,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         return
             keccak256(
                 abi.encode(
-                    proposalId,
                     merkleRoot,
                     validatorsToRemove,
                     jobHashes,

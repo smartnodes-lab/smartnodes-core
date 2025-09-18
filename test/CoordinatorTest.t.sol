@@ -51,7 +51,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         bytes32 proposalHash = keccak256(
             abi.encode(
-                1,
                 merkleRoot,
                 validatorsToRemove,
                 jobHashes,
@@ -148,7 +147,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         bytes32 proposalHash = keccak256(
             abi.encode(
-                1,
                 merkleRoot,
                 validatorsToRemove,
                 jobHashes,
@@ -235,7 +233,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         bytes32 proposalHash = keccak256(
             abi.encode(
-                1,
                 merkleRoot,
                 validatorsToRemove,
                 jobHashes,
@@ -282,7 +279,6 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         bytes32 proposalHash = keccak256(
             abi.encode(
-                1,
                 merkleRoot,
                 validatorsToRemove,
                 jobHashes,
@@ -304,16 +300,5 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         assertEq(proposal.votes, 1);
 
         console.log("Voting successful. Total votes:", proposal.votes);
-    }
-
-    function testCannotVoteTwice() public {
-        (uint128 updateTime, ) = coordinator.timeConfig();
-        vm.warp(block.timestamp + updateTime * 2);
-
-        uint256 numWorkers = 1;
-        (
-            Participant[] memory participants,
-            uint256 totalCapacity
-        ) = _setupTestParticipants(numWorkers, false);
     }
 }
