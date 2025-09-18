@@ -2,7 +2,7 @@
 pragma solidity ^0.8.22;
 
 import {Test, console} from "forge-std/Test.sol";
-import {SmartnodesToken} from "../src/SmartnodesToken.sol";
+import {SmartnodesERC20} from "../src/SmartnodesERC20.sol";
 import {SmartnodesCore} from "../src/SmartnodesCore.sol";
 import {SmartnodesCoordinator} from "../src/SmartnodesCoordinator.sol";
 import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
@@ -34,7 +34,7 @@ abstract contract BaseSmartnodesTest is Test {
     }
 
     // Contract instances
-    SmartnodesToken public token;
+    SmartnodesERC20 public token;
     SmartnodesCore public core;
     SmartnodesCoordinator public coordinator;
     SmartnodesDAO public dao;
@@ -80,7 +80,7 @@ abstract contract BaseSmartnodesTest is Test {
         // genesisNodes.push(worker2);
         // genesisNodes.push(worker3);
 
-        token = new SmartnodesToken(DEPLOYMENT_MULTIPLIER, genesisNodes);
+        token = new SmartnodesERC20(DEPLOYMENT_MULTIPLIER, genesisNodes);
         dao = new SmartnodesDAO(address(token), DAO_VOTING_PERIOD, 500);
         core = new SmartnodesCore(address(token));
 
@@ -123,9 +123,10 @@ abstract contract BaseSmartnodesTest is Test {
     function createDAOProposal(
         address[] memory targets,
         bytes[] memory calldatas,
+        uint256[] memory values,
         string memory description
     ) internal returns (uint256 proposalId) {
-        proposalId = dao.propose(targets, calldatas, description);
+        proposalId = dao.propose(targets, calldatas, values, description);
     }
 
     // Helper function to vote on DAO proposals in tests

@@ -19,7 +19,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * @dev Uses simple DAO-based access control system to control staking requirements and upgrades
  * @dev to SmartnodesCore and SmartnodesCoordinator.
  */
-contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
+contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     /** Errors */
     error Token__InsufficientBalance();
     error Token__InvalidAddress();

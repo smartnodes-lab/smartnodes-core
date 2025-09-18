@@ -3,7 +3,7 @@ pragma solidity ^0.8.22;
 
 import {Test, console} from "forge-std/Test.sol";
 import {SmartnodesCoordinator} from "../src/SmartnodesCoordinator.sol";
-import {SmartnodesToken} from "../src/SmartnodesToken.sol";
+import {SmartnodesERC20} from "../src/SmartnodesERC20.sol";
 import {BaseSmartnodesTest} from "./BaseTest.sol";
 
 /**
@@ -90,7 +90,7 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         (
             bytes32 storedRoot,
-            SmartnodesToken.PaymentAmounts memory workerReward,
+            SmartnodesERC20.PaymentAmounts memory workerReward,
             uint256 storedCapacity,
             bool active,
             uint256 timestamp
@@ -192,7 +192,7 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
 
         (
             bytes32 storedRoot,
-            SmartnodesToken.PaymentAmounts memory workerReward,
+            SmartnodesERC20.PaymentAmounts memory workerReward,
             uint256 storedCapacity,
             bool active,
             uint256 timestamp

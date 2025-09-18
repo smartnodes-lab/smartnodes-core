@@ -67,6 +67,7 @@ contract SmartnodesDAO is ReentrancyGuard {
         bool queued;
         address[] targets;
         bytes[] calldatas;
+        uint256[] values;
         string description;
     }
 
@@ -137,6 +138,7 @@ contract SmartnodesDAO is ReentrancyGuard {
     function propose(
         address[] calldata targets,
         bytes[] calldata calldatas,
+        uint256[] calldata values,
         string calldata description
     ) external returns (uint256) {
         uint256 targetsLength = targets.length;
@@ -168,13 +170,9 @@ contract SmartnodesDAO is ReentrancyGuard {
         p.startTime = uint128(block.timestamp);
         p.endTime = uint128(block.timestamp + votingPeriod);
 
-        // Copy arrays
-        p.targets = new address[](targetsLength);
-        p.calldatas = new bytes[](targetsLength);
-        for (uint256 i = 0; i < targetsLength; ++i) {
-            p.targets[i] = targets[i];
-            p.calldatas[i] = calldatas[i];
-        }
+        p.targets = targets;
+        p.calldatas = calldatas;
+        p.values = values;
         p.description = description;
 
         emit ProposalCreated(
@@ -269,9 +267,10 @@ contract SmartnodesDAO is ReentrancyGuard {
         // Execute all calls
         uint256 targetsLength = p.targets.length;
         for (uint256 i = 0; i < targetsLength; ++i) {
-            (bool success, bytes memory returnData) = p.targets[i].call(
-                p.calldatas[i]
-            );
+            (bool success, bytes memory returnData) = p.targets[i].call{
+                value: p.values[i]
+            }(p.calldatas[i]);
+
             if (!success) {
                 // Handle revert reason
                 if (returnData.length > 0) {
