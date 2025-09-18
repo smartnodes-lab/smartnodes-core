@@ -430,8 +430,14 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             VALIDATOR_REWARD_PERCENTAGE) / 100;
         uint256 expectedValidatorEth = (totalEthReward *
             VALIDATOR_REWARD_PERCENTAGE) / 100;
-        uint256 expectedWorkerSno = totalSnoReward - expectedValidatorSno;
-        uint256 expectedWorkerEth = totalEthReward - expectedValidatorEth;
+        uint256 expectedDaoSno = (totalSnoReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedDaoEth = (totalEthReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedWorkerSno = totalSnoReward -
+            expectedValidatorSno -
+            expectedDaoSno;
+        uint256 expectedWorkerEth = totalEthReward -
+            expectedValidatorEth -
+            expectedDaoEth;
 
         assertEq(
             workerReward.sno,
@@ -469,15 +475,18 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
             ADDITIONAL_SNO_PAYMENT;
         uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
 
-        // Validator rewards (already paid out directly in contract)
-        uint256 validatorSnoReward = (totalSnoReward *
+        uint256 expectedValidatorSno = (totalSnoReward *
             VALIDATOR_REWARD_PERCENTAGE) / 100;
-        uint256 validatorEthReward = (totalEthReward *
+        uint256 expectedValidatorEth = (totalEthReward *
             VALIDATOR_REWARD_PERCENTAGE) / 100;
-
-        // Worker reward pools
-        uint256 expectedWorkerSno = totalSnoReward - validatorSnoReward;
-        uint256 expectedWorkerEth = totalEthReward - validatorEthReward;
+        uint256 expectedDaoSno = (totalSnoReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedDaoEth = (totalEthReward * DAO_REWARD_PERCENTAGE) / 100;
+        uint256 expectedWorkerSno = totalSnoReward -
+            expectedValidatorSno -
+            expectedDaoSno;
+        uint256 expectedWorkerEth = totalEthReward -
+            expectedValidatorEth -
+            expectedDaoEth;
 
         uint256 totalCapacity = 0;
         for (uint256 i = 0; i < participants.length; i++) {
@@ -559,22 +568,25 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
 
         // Pre-claim balances
         uint256 preClaimBalance = token.balanceOf(worker.addr);
-        uint256 preClaimEth = worker.addr.balance;
 
         // Claim rewards
         vm.prank(worker.addr);
         token.claimMerkleRewards(distributionId, worker.capacity, proof);
 
-        // Calculate expected rewards
-        (, SmartnodesToken.PaymentAmounts memory workerReward, , , ) = token
-            .s_distributions(distributionId);
-
         uint256 validatorSnoReward = ((INITIAL_EMISSION_RATE *
             DEPLOYMENT_MULTIPLIER +
             ADDITIONAL_SNO_PAYMENT) * VALIDATOR_REWARD_PERCENTAGE) / 100;
+
+        uint256 daoSnoReward = ((INITIAL_EMISSION_RATE *
+            DEPLOYMENT_MULTIPLIER +
+            ADDITIONAL_SNO_PAYMENT) * DAO_REWARD_PERCENTAGE) / 100;
+
         uint256 expectedWorkerSno = (INITIAL_EMISSION_RATE *
             DEPLOYMENT_MULTIPLIER +
-            ADDITIONAL_SNO_PAYMENT) - validatorSnoReward;
+            ADDITIONAL_SNO_PAYMENT) -
+            validatorSnoReward -
+            daoSnoReward;
+
         uint256 expectedWorkerSnoShare = (expectedWorkerSno * worker.capacity) /
             totalCapacity;
 

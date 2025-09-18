@@ -15,6 +15,7 @@ abstract contract BaseSmartnodesTest is Test {
     uint256 constant DEPLOYMENT_MULTIPLIER = 1;
     uint128 constant INTERVAL_SECONDS = 1 minutes;
     uint256 constant VALIDATOR_REWARD_PERCENTAGE = 10;
+    uint256 constant DAO_REWARD_PERCENTAGE = 3;
     uint256 constant ADDITIONAL_SNO_PAYMENT = 1000e18;
     uint256 constant ADDITIONAL_ETH_PAYMENT = 5 ether;
     uint256 constant INITIAL_EMISSION_RATE = 5832e18;

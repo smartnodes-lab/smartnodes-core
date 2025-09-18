@@ -71,6 +71,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
 
     /** Constants */
     uint8 private constant VALIDATOR_REWARD_PERCENTAGE = 10;
+    uint8 private constant DAO_REWARD_PERCENTAGE = 3;
     uint256 private constant BASE_EMISSION_RATE = 5832e18; // Base hourly emission rate
     uint256 private constant TAIL_EMISSION = 420e18; // Base hourly tail emission
     uint256 private constant REWARD_PERIOD = 365 days;
@@ -91,17 +92,16 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     uint256 public s_validatorLockAmount;
     uint256 public s_userLockAmount;
 
-    uint256 public s_currentDistributionId;
+    // Payment and rewards tracking (SNO + ETH)
     PaymentAmounts public s_totalUnclaimed;
     PaymentAmounts public s_totalEscrowed;
-    uint256 public s_totalLocked;
-
-    uint256 public s_distributionInterval;
-    uint256 public s_lastDistributionTime;
-
-    // ETH balance tracking
+    uint256 public s_totalLocked; // SNO
     uint256 public s_totalETHDeposited;
     uint256 public s_totalETHWithdrawn;
+
+    uint256 public s_currentDistributionId;
+    uint256 public s_distributionInterval;
+    uint256 public s_lastDistributionTime;
 
     mapping(uint256 => MerkleDistribution) public s_distributions;
     mapping(uint256 => mapping(address => bool)) public s_claimed;
@@ -120,8 +120,9 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     }
 
     modifier onlyDAO() {
-        if (s_dao != address(0)) {
-            if (msg.sender != s_dao) {
+        address dao = s_dao;
+        if (dao != address(0)) {
+            if (msg.sender != dao) {
                 revert Token__OnlyDAO();
             }
         }
@@ -161,6 +162,11 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         address[] validators,
         uint256 totalSno,
         uint256 totalEth
+    );
+    event DAORewardsDistributed(
+        uint256 indexed distributionId,
+        uint256 snoAmount,
+        uint256 ethAmount
     );
     event ETHDeposited(address indexed from, uint256 amount);
     event ETHWithdrawn(address indexed to, uint256 amount);
@@ -315,7 +321,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
                 ethShare += ethRemainder;
             }
 
-            _payValidator(validator, snoShare, ethShare);
+            _payAccount(validator, snoShare, ethShare);
         }
 
         emit ValidatorRewardsDistributed(
@@ -332,7 +338,7 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      * @param snoAmount Amount of SNO tokens to mint/send
      * @param ethAmount Amount of ETH to transfer
      */
-    function _payValidator(
+    function _payAccount(
         address validator,
         uint256 snoAmount,
         uint256 ethAmount
@@ -362,9 +368,9 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      * @param _payments Additional payments to be added to the current emission rate
      * @param _approvedValidators List of validators that voted
      * @param _dustValidator Address of validator to receive dust rewards (usually the proposal executor)
-     * @dev Workers receive 90% of the total reward, validators receive 10%
-     * @dev Rewards are distributed with bias towards specified validator, then proportionally to workers based on their capacities
-     * @dev This function is called by SmartnodesCore during state updates to distribute rewards.
+     * @dev Workers receive 85% of the total reward, validators receive 10%, dao receives 5%
+     * @dev Rewards are distributed proportionally to workers based on their capacities.
+     * @dev This function is called periodically by SmartnodesCore during state updates to distribute rewards.
      */
     function createMerkleDistribution(
         bytes32 _merkleRoot,
@@ -389,54 +395,71 @@ contract SmartnodesToken is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
 
         uint256 distributionId = ++s_currentDistributionId;
 
-        if (_totalCapacity == 0) {
-            // All rewards go to validators
-            _distributeValidatorRewards(
-                _approvedValidators,
-                totalReward,
-                distributionId,
-                _dustValidator
-            );
-            return; // exit early
-        }
-
-        // Split validator/worker share from the remaining pool
-        PaymentAmounts memory validatorReward = PaymentAmounts({
+        // Calculate reward distributions
+        PaymentAmounts memory daoReward = PaymentAmounts({
             sno: uint128(
-                (uint256(totalReward.sno) * VALIDATOR_REWARD_PERCENTAGE) / 100
+                (uint256(totalReward.sno) * DAO_REWARD_PERCENTAGE) / 100
             ),
             eth: uint128(
-                (uint256(totalReward.eth) * VALIDATOR_REWARD_PERCENTAGE) / 100
+                (uint256(totalReward.eth) * DAO_REWARD_PERCENTAGE) / 100
             )
         });
+        PaymentAmounts memory validatorReward;
 
-        PaymentAmounts memory workerReward = PaymentAmounts({
-            sno: totalReward.sno - validatorReward.sno,
-            eth: totalReward.eth - validatorReward.eth
-        });
+        if (_totalCapacity == 0) {
+            // If no workers, just give to validators
+            validatorReward = PaymentAmounts({
+                sno: totalReward.sno - daoReward.sno,
+                eth: totalReward.eth - daoReward.eth
+            });
+        } else {
+            // Split validator/worker share from the remaining pool
+            validatorReward = PaymentAmounts({
+                sno: uint128(
+                    (uint256(totalReward.sno) * VALIDATOR_REWARD_PERCENTAGE) /
+                        100
+                ),
+                eth: uint128(
+                    (uint256(totalReward.eth) * VALIDATOR_REWARD_PERCENTAGE) /
+                        100
+                )
+            });
 
-        // Store merkle distribution (only worker rewards are stored for claiming)
-        s_distributions[distributionId] = MerkleDistribution({
-            merkleRoot: _merkleRoot,
-            workerReward: workerReward,
-            totalCapacity: _totalCapacity,
-            active: true,
-            timestamp: block.timestamp
-        });
+            PaymentAmounts memory workerReward = PaymentAmounts({
+                sno: totalReward.sno - validatorReward.sno - daoReward.sno,
+                eth: totalReward.eth - validatorReward.eth - daoReward.eth
+            });
 
-        // Update total unclaimed (only worker rewards)
-        s_totalUnclaimed.sno += workerReward.sno;
-        s_totalUnclaimed.eth += workerReward.eth;
+            // Store merkle distribution (only worker rewards are stored for claiming)
+            s_distributions[distributionId] = MerkleDistribution({
+                merkleRoot: _merkleRoot,
+                workerReward: workerReward,
+                totalCapacity: _totalCapacity,
+                active: true,
+                timestamp: block.timestamp
+            });
 
-        emit MerkleDistributionCreated(
+            // Update total unclaimed (only worker rewards)
+            s_totalUnclaimed.sno += workerReward.sno;
+            s_totalUnclaimed.eth += workerReward.eth;
+
+            emit MerkleDistributionCreated(
+                distributionId,
+                _merkleRoot,
+                totalReward.sno,
+                totalReward.eth,
+                block.timestamp
+            );
+        }
+        // Distribute DAO rewards
+        _payAccount(s_dao, daoReward.sno, daoReward.eth);
+        emit DAORewardsDistributed(
             distributionId,
-            _merkleRoot,
-            totalReward.sno,
-            totalReward.eth,
-            block.timestamp
+            daoReward.sno,
+            daoReward.eth
         );
 
-        // Distribute validator rewards immediately with bias
+        // Distribute validator rewards
         _distributeValidatorRewards(
             _approvedValidators,
             validatorReward,
