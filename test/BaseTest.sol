@@ -1,28 +1,28 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
 import {SmartnodesERC20} from "../src/SmartnodesERC20.sol";
 import {SmartnodesCore} from "../src/SmartnodesCore.sol";
 import {SmartnodesCoordinator} from "../src/SmartnodesCoordinator.sol";
 import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
 /**
  * @title BaseSmartnodesTest
  * @notice Base test contract with common setup for all Smartnodes tests
  */
 abstract contract BaseSmartnodesTest is Test {
-    uint256 constant DEPLOYMENT_MULTIPLIER = 1;
-    uint128 constant INTERVAL_SECONDS = 1 minutes;
+    uint128 constant UPDATE_TIME = 8 hours;
     uint256 constant VALIDATOR_REWARD_PERCENTAGE = 10;
-    uint256 constant DAO_REWARD_PERCENTAGE = 3;
+    uint256 constant DAO_REWARD_PERCENTAGE = 5;
     uint256 constant ADDITIONAL_SNO_PAYMENT = 1000e18;
     uint256 constant ADDITIONAL_ETH_PAYMENT = 5 ether;
-    uint256 constant INITIAL_EMISSION_RATE = 5832e18;
-    uint256 constant TAIL_EMISSION = 420e18;
+    uint256 constant INITIAL_EMISSION_RATE = 45_000e18;
+    uint256 constant TAIL_EMISSION = 3_360e18;
     uint256 constant VALIDATOR_LOCK_AMOUNT = 1_000_000e18;
     uint256 constant USER_LOCK_AMOUNT = 100e18;
-    uint256 constant UNLOCK_PERIOD = 14 days;
+    uint256 constant UNLOCK_PERIOD = 30 days;
     uint256 constant REWARD_PERIOD = 365 days;
     uint256 constant DAO_VOTING_PERIOD = 7 days;
 
@@ -38,6 +38,7 @@ abstract contract BaseSmartnodesTest is Test {
     SmartnodesCore public core;
     SmartnodesCoordinator public coordinator;
     SmartnodesDAO public dao;
+    TimelockController public timelock;
 
     // Test addresses
     address public deployerAddr = makeAddr("deployer");
@@ -79,14 +80,22 @@ abstract contract BaseSmartnodesTest is Test {
         // genesisNodes.push(worker1);
         // genesisNodes.push(worker2);
         // genesisNodes.push(worker3);
+        address[] memory proposers = new address[](0);
+        address[] memory executors = new address[](0);
 
-        token = new SmartnodesERC20(DEPLOYMENT_MULTIPLIER, genesisNodes);
-        dao = new SmartnodesDAO(address(token), DAO_VOTING_PERIOD, 500);
+        token = new SmartnodesERC20(genesisNodes);
+        timelock = new TimelockController(
+            2 days,
+            proposers,
+            executors,
+            deployerAddr
+        );
+        dao = new SmartnodesDAO(token, timelock);
         core = new SmartnodesCore(address(token));
 
         // Deploy coordinator
         coordinator = new SmartnodesCoordinator(
-            INTERVAL_SECONDS,
+            UPDATE_TIME,
             66,
             address(core),
             address(token),
@@ -96,7 +105,7 @@ abstract contract BaseSmartnodesTest is Test {
         // Set DAO in token (can only be done once)
         token.setSmartnodes(address(core), address(coordinator));
 
-        token.setDAO(address(dao));
+        token.setDAO(address(timelock));
         core.setCoordinator(address(coordinator));
 
         vm.stopPrank();
@@ -117,37 +126,6 @@ abstract contract BaseSmartnodesTest is Test {
         core.createValidator(VALIDATOR1_PUBKEY);
         vm.prank(validator1);
         coordinator.addValidator();
-    }
-
-    // Helper function for tests that need to create DAO proposals
-    function createDAOProposal(
-        address[] memory targets,
-        bytes[] memory calldatas,
-        uint256[] memory values,
-        string memory description
-    ) internal returns (uint256 proposalId) {
-        proposalId = dao.propose(targets, calldatas, values, description);
-    }
-
-    // Helper function to vote on DAO proposals in tests
-    function voteOnProposal(
-        uint256 proposalId,
-        address voter,
-        uint256 votes,
-        bool support
-    ) internal {
-        vm.startPrank(voter);
-        token.approve(address(dao), votes);
-        dao.vote(proposalId, support, votes);
-        vm.stopPrank();
-    }
-
-    // Helper function to execute DAO proposals in tests
-    function executeProposal(uint256 proposalId) internal {
-        vm.warp(block.timestamp + DAO_VOTING_PERIOD + 1);
-        dao.queue(proposalId);
-        vm.warp(block.timestamp + dao.TIMELOCK_DELAY());
-        dao.execute(proposalId);
     }
 
     // ============= Helper Functions =============
@@ -186,7 +164,10 @@ abstract contract BaseSmartnodesTest is Test {
         }
     }
 
-    function createBasicProposal(address validator) internal returns (uint8) {
+    function createBasicProposal(
+        address validator,
+        uint256 distributionId
+    ) internal returns (uint8) {
         // Helper to create a basic proposal for testing
         bytes32[] memory jobHashes = new bytes32[](1);
         jobHashes[0] = JOB_ID_1;
@@ -202,7 +183,7 @@ abstract contract BaseSmartnodesTest is Test {
             Participant[] memory participants,
             uint256 totalCapacity
         ) = _setupTestParticipants(jobWorkers.length, false);
-        bytes32[] memory leaves = _generateLeaves(participants);
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
         bytes32 merkleRoot = _buildMerkleTree(leaves);
 
         bytes32 proposalHash = keccak256(
@@ -227,13 +208,18 @@ abstract contract BaseSmartnodesTest is Test {
      * @notice Generate Merkle tree leaves from participants
      */
     function _generateLeaves(
-        Participant[] memory participants
+        Participant[] memory participants,
+        uint256 distributionId
     ) internal pure returns (bytes32[] memory) {
         bytes32[] memory leaves = new bytes32[](participants.length);
 
         for (uint256 i = 0; i < participants.length; i++) {
             leaves[i] = keccak256(
-                abi.encode(participants[i].addr, participants[i].capacity)
+                abi.encode(
+                    participants[i].addr,
+                    participants[i].capacity,
+                    distributionId
+                )
             );
         }
 

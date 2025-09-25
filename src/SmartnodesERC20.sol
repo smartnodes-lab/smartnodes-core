@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.22;
+pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ISmartnodesCore} from "./interfaces/ISmartnodesCore.sol";
@@ -14,7 +14,6 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * @title Payment and Governance Token for the Smartnodes Network
  * @dev Non-upgradeable ERC20 token for job payments, node rewards, and node collateral.
  * @dev Rewards are distributed perioidcally by the SmartnodesCore and SmartnodesCoordinator.
- * @dev Rewards can be claimed bu
  * @dev Reward distribution undergoes yearly 40% reductions until a tail emission is reached.
  * @dev Uses simple DAO-based access control system to control staking requirements and upgrades
  * @dev to SmartnodesCore and SmartnodesCoordinator.
@@ -32,20 +31,22 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     error Token__CoreAlreadySet();
     error Token__InvalidMerkleRoot();
     error Token__InvalidMerkleProof();
-    error Token__DistributionNotActive();
     error Token__RewardsAlreadyClaimed();
-    error Token__InvalidValidatorLength();
+    error Token__InvalidArrayLength();
     error Token__ETHTransferFailed();
     error Token__OnlyDAO();
     error Token__DAOAlreadySet();
     error Token__DistributionTooEarly();
     error Token__InvalidInterval();
+    error Token__DistributionTooOld();
+    error Token__NotValidator();
 
     // Token lock struct for both validators and users
     struct LockedTokens {
         bool locked;
         bool isValidator;
         uint128 unlockTime;
+        uint256 lockedAmount;
     }
 
     // Job payments and rewards can be SNO or ETH
@@ -65,21 +66,23 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         bytes32 merkleRoot;
         PaymentAmounts workerReward;
         uint256 totalCapacity;
-        bool active;
         uint256 timestamp;
+        uint256 nonce;
     }
 
     /** Constants */
     uint8 private constant VALIDATOR_REWARD_PERCENTAGE = 10;
-    uint8 private constant DAO_REWARD_PERCENTAGE = 3;
-    uint256 private constant BASE_EMISSION_RATE = 5832e18; // Base hourly emission rate
-    uint256 private constant TAIL_EMISSION = 420e18; // Base hourly tail emission
+    uint8 private constant DAO_REWARD_PERCENTAGE = 5;
+    uint256 private constant BASE_EMISSION_RATE = 5625e18; // Base 1 hour emission rate
+    uint256 private constant TAIL_EMISSION = 420e18; // Base 1 hour tail emission
     uint256 private constant REWARD_PERIOD = 365 days;
-    uint256 private constant UNLOCK_PERIOD = 14 days;
-    uint256 private constant BASE_INTERVAL = 1 hours; // Base interval for emission calculation
-
-    uint256 private immutable i_deploymentTimestamp;
-    uint256 private immutable i_emissionMultiplier;
+    uint256 private constant UNLOCK_PERIOD = 30 days;
+    uint256 private constant INITIAL_INTERVAL = 8; // Start with 128 hour interval for emission calculation
+    uint256 private constant MAX_INTERVAL = 256; // Minimum and maximum distribution intervals (# hours)
+    uint256 private constant MIN_INTERVAL = 1;
+    uint256 private constant MAX_BATCH_SIZE = 100; // Batch reward claim limit for a single call
+    uint256 private constant MAX_DISTRIBUTIONS = 500;
+    uint256 public immutable i_deploymentTimestamp;
 
     /** State Variables */
     ISmartnodesCore public s_smartnodesCore;
@@ -105,8 +108,8 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
 
     mapping(uint256 => MerkleDistribution) public s_distributions;
     mapping(uint256 => mapping(address => bool)) public s_claimed;
-    mapping(address => LockedTokens) private s_lockedTokens;
-    mapping(address => PaymentAmounts) private s_escrowedPayments;
+    mapping(address => LockedTokens) public s_lockedTokens;
+    mapping(address => PaymentAmounts) public s_escrowedPayments;
 
     /** Modifiers */
     modifier onlySmartnodesCore() {
@@ -142,7 +145,16 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     );
     event UnlockInitiated(address indexed user, uint256 unlockTime);
     event EthRewardsClaimed(address indexed user, uint256 amount);
-    event TokenRewardsClaimed(address indexed user, uint256 amount);
+    event TokenRewardsClaimed(
+        uint256 indexed distributionId,
+        address indexed user,
+        uint256 amount
+    );
+    event ClaimFailed(
+        uint256 indexed distributionId,
+        address indexed user,
+        string reason
+    );
     event SmartnodesSet(
         address indexed coreContract,
         address indexed coordinatorContract
@@ -171,25 +183,30 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     event ETHDeposited(address indexed from, uint256 amount);
     event ETHWithdrawn(address indexed to, uint256 amount);
     event DistributionIntervalUpdated(uint256 oldInterval, uint256 newInterval);
+    event DistributionExpired(uint256 distributionId);
+    event ValidatorSlashed(
+        address indexed validator,
+        uint256 slashedAmount,
+        uint256 remainingAmount
+    );
+    event SlashedTokensBurned(uint256 amount);
 
     constructor(
-        uint256 emissionMultiplier,
         address[] memory _genesisNodes
-    ) ERC20("SmartnodesToken", "SNO") ERC20Permit("SmartnodesToken") {
+    ) ERC20("Smartnodes", "SNO") ERC20Permit("Smartnodes") {
         i_deploymentTimestamp = block.timestamp;
-        i_emissionMultiplier = emissionMultiplier;
         s_coreSet = false;
         s_daoSet = false;
 
         // Set initial distribution interval based on emission multiplier
-        s_distributionInterval = BASE_INTERVAL * emissionMultiplier;
+        s_distributionInterval = INITIAL_INTERVAL;
         s_validatorLockAmount = 1_000_000e18;
         s_userLockAmount = 100e18;
 
         // Mint initial tokens to genesis nodes
         uint256 gensisNodesLength = _genesisNodes.length;
         for (uint256 i = 0; i < gensisNodesLength; i++) {
-            _mint(_genesisNodes[i], (s_validatorLockAmount * 4) / 2);
+            _mint(_genesisNodes[i], (s_validatorLockAmount * 3));
         }
     }
 
@@ -215,68 +232,6 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         s_daoSet = true;
 
         emit DAOSet(_dao);
-    }
-
-    // ============ DAO-Controlled Functions ============
-    /**
-     * @dev Sets the Smartnodes contract addresses. Can only be called by DAO.
-     * @param _smartnodesCore Address of the deployed SmartnodesCore contract
-     * @param _smartnodesCoordinator Address of the deployed SmartnodesCoordinator contract
-     */
-    function setSmartnodes(
-        address _smartnodesCore,
-        address _smartnodesCoordinator
-    ) external onlyDAO {
-        if (s_coreSet) {
-            revert Token__CoreAlreadySet();
-        }
-        if (_smartnodesCore == address(0)) {
-            revert Token__InvalidAddress();
-        }
-
-        s_smartnodesCore = ISmartnodesCore(_smartnodesCore);
-        s_smartnodesCoordinator = ISmartnodesCoordinator(
-            _smartnodesCoordinator
-        );
-        s_coreSet = true;
-
-        emit SmartnodesSet(_smartnodesCore, _smartnodesCoordinator);
-    }
-
-    /**
-     * @dev Sets validator lock amount. Can only be called by DAO.
-     * @param _newAmount New validator lock amount
-     */
-    function setValidatorLockAmount(uint256 _newAmount) external onlyDAO {
-        uint256 oldAmount = s_validatorLockAmount;
-        s_validatorLockAmount = _newAmount;
-        emit ValidatorLockAmountUpdated(oldAmount, _newAmount);
-    }
-
-    /**
-     * @dev Sets user lock amount. Can only be called by DAO.
-     * @param _newAmount New user lock amount
-     */
-    function setUserLockAmount(uint256 _newAmount) external onlyDAO {
-        uint256 oldAmount = s_userLockAmount;
-        s_userLockAmount = _newAmount;
-        emit UserLockAmountUpdated(oldAmount, _newAmount);
-    }
-
-    /**
-     * @notice Convenience function to halve the distribution interval
-     */
-    function halveDistributionInterval() external onlyDAO nonReentrant {
-        s_distributionInterval /= 2;
-        s_smartnodesCoordinator.updateTiming(s_distributionInterval);
-    }
-
-    /**
-     * @notice Convenience function to double the distribution interval
-     */
-    function doubleDistributionInterval() external onlyDAO nonReentrant {
-        s_distributionInterval *= 2;
-        s_smartnodesCoordinator.updateTiming(s_distributionInterval);
     }
 
     // ============ Emissions & Halving ============
@@ -350,14 +305,12 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
 
         if (snoAmount > 0) {
             _mint(validator, snoAmount);
-            emit TokenRewardsClaimed(validator, uint128(snoAmount));
         }
 
         if (ethAmount > 0) {
             s_totalETHWithdrawn += ethAmount;
             (bool sent, ) = validator.call{value: ethAmount}("");
             if (!sent) revert Token__ETHTransferFailed();
-            emit EthRewardsClaimed(validator, uint128(ethAmount));
         }
     }
 
@@ -380,7 +333,17 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         address _dustValidator
     ) external onlySmartnodesCore nonReentrant {
         uint8 _nValidators = uint8(_approvedValidators.length);
-        if (_nValidators == 0) revert Token__InvalidValidatorLength();
+        if (_nValidators == 0) revert Token__InvalidArrayLength();
+
+        if (s_lastDistributionTime != 0) {
+            if (
+                block.timestamp <
+                s_lastDistributionTime + s_distributionInterval
+            ) {
+                revert Token__DistributionTooEarly();
+            }
+        }
+        s_lastDistributionTime = block.timestamp;
 
         // Total rewards to be distributed
         PaymentAmounts memory totalReward = PaymentAmounts({
@@ -404,27 +367,18 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
                 (uint256(totalReward.eth) * DAO_REWARD_PERCENTAGE) / 100
             )
         });
-        PaymentAmounts memory validatorReward;
 
-        if (_totalCapacity == 0) {
-            // If no workers, just give to validators
-            validatorReward = PaymentAmounts({
-                sno: totalReward.sno - daoReward.sno,
-                eth: totalReward.eth - daoReward.eth
-            });
-        } else {
-            // Split validator/worker share from the remaining pool
-            validatorReward = PaymentAmounts({
-                sno: uint128(
-                    (uint256(totalReward.sno) * VALIDATOR_REWARD_PERCENTAGE) /
-                        100
-                ),
-                eth: uint128(
-                    (uint256(totalReward.eth) * VALIDATOR_REWARD_PERCENTAGE) /
-                        100
-                )
-            });
+        // Split validator/worker share from the remaining pool
+        PaymentAmounts memory validatorReward = PaymentAmounts({
+            sno: uint128(
+                (uint256(totalReward.sno) * VALIDATOR_REWARD_PERCENTAGE) / 100
+            ),
+            eth: uint128(
+                (uint256(totalReward.eth) * VALIDATOR_REWARD_PERCENTAGE) / 100
+            )
+        });
 
+        if (_totalCapacity != 0) {
             PaymentAmounts memory workerReward = PaymentAmounts({
                 sno: totalReward.sno - validatorReward.sno - daoReward.sno,
                 eth: totalReward.eth - validatorReward.eth - daoReward.eth
@@ -435,8 +389,8 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
                 merkleRoot: _merkleRoot,
                 workerReward: workerReward,
                 totalCapacity: _totalCapacity,
-                active: true,
-                timestamp: block.timestamp
+                timestamp: block.timestamp,
+                nonce: distributionId
             });
 
             // Update total unclaimed (only worker rewards)
@@ -451,6 +405,12 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
                 block.timestamp
             );
         }
+
+        // Clean up oldest distribution if we exceed MAX_DISTRIBUTIONS
+        if (distributionId > MAX_DISTRIBUTIONS) {
+            _cleanupOldestDistribution();
+        }
+
         // Distribute DAO rewards
         _payAccount(s_dao, daoReward.sno, daoReward.eth);
         emit DAORewardsDistributed(
@@ -469,75 +429,17 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     }
 
     /**
-     * @notice Internal helper function to process a single reward claim
-     * @param _user Address of the user claiming rewards
-     * @param _distributionId The ID of the distribution to claim from
-     * @param _capacity Worker capacity associated with rewards claim
-     * @param _merkleProof Merkle proof validating the claim
+     * @notice Internal function to clean up the oldest distribution when we exceed MAX_DISTRIBUTIONS
+     * @dev This function is called automatically when creating a new distribution
      */
-    function _processClaim(
-        address _user,
-        uint256 _distributionId,
-        uint256 _capacity,
-        bytes32[] calldata _merkleProof
-    ) internal {
-        MerkleDistribution memory distribution = s_distributions[
-            _distributionId
-        ];
+    function _cleanupOldestDistribution() internal {
+        uint256 currentId = s_currentDistributionId;
 
-        if (!distribution.active) {
-            revert Token__DistributionNotActive();
-        }
+        if (currentId > MAX_DISTRIBUTIONS) {
+            uint256 oldestId = currentId - MAX_DISTRIBUTIONS;
 
-        if (s_claimed[_distributionId][_user]) {
-            revert Token__RewardsAlreadyClaimed();
-        }
-
-        // Verify Merkle proof
-        bytes32 leaf = keccak256(abi.encode(_user, _capacity));
-        if (!MerkleProof.verify(_merkleProof, distribution.merkleRoot, leaf)) {
-            revert Token__InvalidMerkleProof();
-        }
-
-        // Mark as claimed
-        s_claimed[_distributionId][_user] = true;
-
-        uint128 eth;
-        uint128 sno;
-
-        // Calculate worker rewards
-        uint256 totalWorkerCapacity = distribution.totalCapacity;
-
-        eth = uint128(
-            (distribution.workerReward.eth * _capacity) / totalWorkerCapacity
-        );
-        sno = uint128(
-            (distribution.workerReward.sno * _capacity) / totalWorkerCapacity
-        );
-
-        // Check ETH balance before transfer
-        if (eth > 0 && address(this).balance < eth) {
-            revert Token__InsufficientBalance();
-        }
-
-        // Update total unclaimed
-        s_totalUnclaimed.eth -= eth;
-        s_totalUnclaimed.sno -= sno;
-
-        // Mint SNO tokens
-        if (sno > 0) {
-            _mint(_user, sno);
-            emit TokenRewardsClaimed(_user, sno);
-        }
-
-        // Transfer ETH
-        if (eth > 0) {
-            s_totalETHWithdrawn += eth;
-            (bool sent, ) = _user.call{value: eth}("");
-            if (!sent) {
-                revert Token__ETHTransferFailed();
-            }
-            emit EthRewardsClaimed(_user, eth);
+            delete s_distributions[oldestId];
+            emit DistributionExpired(oldestId);
         }
     }
 
@@ -553,7 +455,17 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         uint256 _capacity,
         bytes32[] calldata _merkleProof
     ) external nonReentrant {
-        _processClaim(msg.sender, _distributionId, _capacity, _merkleProof);
+        // Create single-element arrays and delegate to batch function
+        uint256[] memory distributionIds = new uint256[](1);
+        uint256[] memory capacities = new uint256[](1);
+        bytes32[][] memory merkleProofs = new bytes32[][](1);
+
+        distributionIds[0] = _distributionId;
+        capacities[0] = _capacity;
+        merkleProofs[0] = _merkleProof;
+
+        // Remove nonReentrant from this function since batch function has it
+        _batchClaimMerkleRewards(distributionIds, capacities, merkleProofs);
     }
 
     /**
@@ -568,19 +480,126 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         uint256[] calldata _capacities,
         bytes32[][] calldata _merkleProofs
     ) external nonReentrant {
+        // Convert calldata to memory and delegate to internal function
         uint256 length = _distributionIds.length;
+        uint256[] memory distributionIds = new uint256[](length);
+        uint256[] memory capacities = new uint256[](length);
+        bytes32[][] memory merkleProofs = new bytes32[][](length);
 
-        if (length != _capacities.length || length != _merkleProofs.length) {
-            revert Token__InvalidAddress(); // Reusing existing error for array length mismatch
+        for (uint256 i; i < length; ) {
+            distributionIds[i] = _distributionIds[i];
+            capacities[i] = _capacities[i];
+            merkleProofs[i] = _merkleProofs[i];
+            unchecked {
+                ++i;
+            }
         }
 
-        for (uint256 i = 0; i < length; i++) {
-            _processClaim(
-                msg.sender,
-                _distributionIds[i],
-                _capacities[i],
-                _merkleProofs[i]
+        _batchClaimMerkleRewards(distributionIds, capacities, merkleProofs);
+    }
+
+    function _batchClaimMerkleRewards(
+        uint256[] memory _distributionIds,
+        uint256[] memory _capacities,
+        bytes32[][] memory _merkleProofs
+    ) internal {
+        uint256 length = _distributionIds.length;
+        if (
+            length != _capacities.length ||
+            length != _merkleProofs.length ||
+            length > MAX_BATCH_SIZE
+        ) {
+            revert Token__InvalidArrayLength();
+        }
+
+        uint256 currentDistribution = s_currentDistributionId;
+
+        // Accumulate all rewards before any storage writes
+        uint256 totalSnoReward;
+        uint256 totalEthReward;
+
+        // Pre-validate all claims and calculate totals
+        for (uint256 i; i < length; ) {
+            uint256 distributionId = _distributionIds[i];
+            MerkleDistribution storage distribution = s_distributions[
+                distributionId
+            ];
+
+            // Pack validation checks
+            if (
+                currentDistribution > MAX_DISTRIBUTIONS ||
+                s_claimed[distributionId][msg.sender]
+            ) {
+                // Use specific reverts based on which condition failed
+                if (s_claimed[distributionId][msg.sender])
+                    revert Token__RewardsAlreadyClaimed();
+                if (distributionId < currentDistribution - MAX_DISTRIBUTIONS)
+                    revert Token__DistributionTooOld();
+            }
+
+            // Verify merkle proof
+            bytes32 leaf = keccak256(
+                abi.encode(msg.sender, _capacities[i], distribution.nonce)
             );
+            if (
+                !MerkleProof.verify(
+                    _merkleProofs[i],
+                    distribution.merkleRoot,
+                    leaf
+                )
+            ) {
+                revert Token__InvalidMerkleProof();
+            }
+
+            // Calculate rewards and accumulate
+            uint256 capacity = _capacities[i];
+            uint256 totalCapacity = distribution.totalCapacity;
+
+            // Use unchecked math where safe to save gas
+            unchecked {
+                totalSnoReward +=
+                    (distribution.workerReward.sno * capacity) /
+                    totalCapacity;
+                totalEthReward +=
+                    (distribution.workerReward.eth * capacity) /
+                    totalCapacity;
+                ++i;
+            }
+        }
+
+        // Batch update all claimed statuses in single loop
+        for (uint256 i; i < length; ) {
+            s_claimed[_distributionIds[i]][msg.sender] = true;
+            unchecked {
+                ++i;
+            }
+        }
+
+        // Single storage update for total unclaimed
+        if (totalSnoReward > 0) {
+            s_totalUnclaimed.sno -= uint128(totalSnoReward);
+            _mint(msg.sender, totalSnoReward);
+
+            // Emit single event for all SNO rewards
+            emit TokenRewardsClaimed(0, msg.sender, totalSnoReward); // Use 0 for batch claims
+        }
+
+        if (totalEthReward > 0) {
+            if (address(this).balance < totalEthReward)
+                revert Token__InsufficientBalance();
+
+            s_totalUnclaimed.eth -= uint128(totalEthReward);
+            s_totalETHWithdrawn += totalEthReward;
+
+            // Assembly for gas-efficient ETH transfer
+            assembly {
+                let success := call(gas(), caller(), totalEthReward, 0, 0, 0, 0)
+                if iszero(success) {
+                    mstore(0x00, 0x90b8ec18) // Token__ETHTransferFailed()
+                    revert(0x1c, 0x04)
+                }
+            }
+            emit EthRewardsClaimed(msg.sender, totalEthReward);
         }
     }
 
@@ -603,7 +622,7 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         // initial * (0.6)^era
         uint256 emission = BASE_EMISSION_RATE;
         for (uint256 i = 0; i < era; i++) {
-            emission = (emission * 6000) / 10000;
+            emission = (emission * 300) / 500;
             if (emission <= TAIL_EMISSION) return TAIL_EMISSION;
         }
 
@@ -617,7 +636,7 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     function getEmissionRate() public view returns (uint256) {
         uint256 era = _currentEra();
         uint256 baseEmission = _emissionForEra(era);
-        return (baseEmission * s_distributionInterval) / BASE_INTERVAL;
+        return (baseEmission * s_distributionInterval);
     }
 
     /**
@@ -626,6 +645,120 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
      */
     function getCurrentEra() external view returns (uint256) {
         return _currentEra();
+    }
+
+    // ============ DAO-Controlled Functions ============
+
+    /**
+     * @dev Sets the Smartnodes contract addresses. Can only be called by DAO.
+     * @param _smartnodesCore Address of the deployed SmartnodesCore contract
+     * @param _smartnodesCoordinator Address of the deployed SmartnodesCoordinator contract
+     */
+    function setSmartnodes(
+        address _smartnodesCore,
+        address _smartnodesCoordinator
+    ) external onlyDAO {
+        if (s_coreSet) {
+            revert Token__CoreAlreadySet();
+        }
+        if (_smartnodesCore == address(0)) {
+            revert Token__InvalidAddress();
+        }
+
+        s_smartnodesCore = ISmartnodesCore(_smartnodesCore);
+        s_smartnodesCoordinator = ISmartnodesCoordinator(
+            _smartnodesCoordinator
+        );
+        s_coreSet = true;
+
+        emit SmartnodesSet(_smartnodesCore, _smartnodesCoordinator);
+    }
+
+    /**
+     * @dev Sets validator lock amount. Can only be called by DAO.
+     * @param _newAmount New validator lock amount
+     */
+    function setValidatorLockAmount(uint256 _newAmount) external onlyDAO {
+        uint256 oldAmount = s_validatorLockAmount;
+        s_validatorLockAmount = _newAmount;
+        emit ValidatorLockAmountUpdated(oldAmount, _newAmount);
+    }
+
+    /**
+     * @dev Sets user lock amount. Can only be called by DAO.
+     * @param _newAmount New user lock amount
+     */
+    function setUserLockAmount(uint256 _newAmount) external onlyDAO {
+        uint256 oldAmount = s_userLockAmount;
+        s_userLockAmount = _newAmount;
+        emit UserLockAmountUpdated(oldAmount, _newAmount);
+    }
+
+    /**
+     * @notice Convenience function to halve the distribution interval
+     */
+    function halveDistributionInterval() external onlyDAO nonReentrant {
+        uint256 oldInterval = s_distributionInterval;
+        if (oldInterval <= MIN_INTERVAL) {
+            revert Token__InvalidInterval();
+        }
+        s_distributionInterval = oldInterval / 2;
+
+        s_smartnodesCoordinator.updateTiming(s_distributionInterval);
+        emit DistributionIntervalUpdated(oldInterval, s_distributionInterval);
+    }
+
+    /**
+     * @notice Convenience function to double the distribution interval
+     */
+    function doubleDistributionInterval() external onlyDAO nonReentrant {
+        uint256 oldInterval = s_distributionInterval;
+        if (oldInterval >= MAX_INTERVAL) {
+            revert Token__InvalidInterval();
+        }
+        s_distributionInterval = oldInterval * 2;
+        s_smartnodesCoordinator.updateTiming(s_distributionInterval);
+        emit DistributionIntervalUpdated(oldInterval, s_distributionInterval);
+    }
+
+    /**
+     * @notice Slash a validator's locked tokens and immediately unlock them
+     * @param _validator The address of the validator to slash
+     * @param _slashAmount The amount of tokens to slash (burn)
+     * @dev Can only be called by DAO. Slashed tokens are burned and remaining tokens are returned to validator.
+     * @dev This function combines slashing with timed unlock to prevent further misbehavior.
+     */
+    function slashAndUnlockValidator(
+        address _validator,
+        uint256 _slashAmount
+    ) external onlyDAO nonReentrant {
+        if (_validator == address(0)) {
+            revert Token__InvalidAddress();
+        }
+
+        LockedTokens storage locked = s_lockedTokens[_validator];
+
+        if (!locked.locked || !locked.isValidator) {
+            revert Token__NotValidator();
+        }
+
+        uint256 lockedAmount = locked.lockedAmount;
+        uint256 remainingAmount = lockedAmount - _slashAmount;
+
+        // Update total locked tracking
+        s_totalLocked -= _slashAmount;
+        locked.lockedAmount = remainingAmount;
+
+        // Initiate the unlock process
+        _initiateUnlock(_validator, locked);
+
+        // Burn the slashed tokens
+        if (_slashAmount > 0) {
+            _burn(address(this), _slashAmount);
+            emit SlashedTokensBurned(_slashAmount);
+        }
+
+        emit ValidatorSlashed(_validator, _slashAmount, remainingAmount);
     }
 
     // ============ Token Locking for Validators ============
@@ -642,13 +775,9 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
             revert Token__InvalidAddress();
         }
 
-        uint256 lockAmount;
-
-        if (_isValidator) {
-            lockAmount = s_validatorLockAmount;
-        } else {
-            lockAmount = s_userLockAmount;
-        }
+        uint256 lockAmount = _isValidator
+            ? s_validatorLockAmount
+            : s_userLockAmount;
 
         if (balanceOf(_user) < lockAmount) {
             revert Token__InsufficientBalance();
@@ -659,6 +788,7 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
 
         locked.locked = true;
         locked.isValidator = _isValidator;
+        locked.lockedAmount = lockAmount;
 
         // Update total locked tracking
         s_totalLocked += lockAmount;
@@ -692,12 +822,7 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
             }
 
             // Finalize the unlock process
-            uint256 lockAmount;
-            if (locked.isValidator) {
-                lockAmount = s_validatorLockAmount;
-            } else {
-                lockAmount = s_userLockAmount;
-            }
+            uint256 lockAmount = locked.lockedAmount;
 
             // Update total locked tracking
             s_totalLocked -= lockAmount;
@@ -707,26 +832,17 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
             emit TokensUnlocked(_user, locked.isValidator, lockAmount);
         } else {
             // If locked is true, initiate the unlock process
-            locked.locked = false;
-            locked.unlockTime = uint128(block.timestamp);
-            emit UnlockInitiated(_user, locked.unlockTime);
+            _initiateUnlock(_user, locked);
         }
     }
 
-    /**
-     * @dev Check if user has locked tokens
-     */
-    function isLocked(address user) external view returns (bool) {
-        return s_lockedTokens[user].locked;
-    }
-
-    /**
-     * @dev Get user's lock information
-     */
-    function getLockInfo(
-        address user
-    ) external view returns (LockedTokens memory) {
-        return s_lockedTokens[user];
+    function _initiateUnlock(
+        address _user,
+        LockedTokens storage locked
+    ) internal {
+        locked.locked = false;
+        locked.unlockTime = uint128(block.timestamp);
+        emit UnlockInitiated(_user, locked.unlockTime);
     }
 
     /**
@@ -830,6 +946,38 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     // ============ View Functions ============
 
     /**
+     * @dev Check if user has locked tokens
+     */
+    function isLocked(address user) external view returns (bool) {
+        return s_lockedTokens[user].locked;
+    }
+
+    /**
+     * @dev Get user's lock information
+     */
+    function getLockInfo(
+        address user
+    )
+        external
+        view
+        returns (
+            bool locked,
+            bool isValidator,
+            uint256 timestamp,
+            uint256 lockAmount
+        )
+    {
+        LockedTokens storage lock = s_lockedTokens[user];
+
+        return (
+            lock.locked,
+            lock.isValidator,
+            lock.unlockTime,
+            lock.lockedAmount
+        );
+    }
+
+    /**
      * @dev Get escrowed payments for a specific address
      */
     function getEscrowedPayments(
@@ -892,31 +1040,6 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
     }
 
     // ============ Required Overrides ============
-
-    /**
-     * @dev Override to prevent voting with locked tokens
-     */
-    function _getVotingUnits(
-        address account
-    ) internal view virtual override returns (uint256) {
-        uint256 balance = balanceOf(account);
-
-        // Subtract locked tokens from voting power
-        if (s_lockedTokens[account].locked) {
-            uint256 lockAmount = s_lockedTokens[account].isValidator
-                ? s_validatorLockAmount
-                : s_userLockAmount;
-
-            if (balance >= lockAmount) {
-                balance -= lockAmount;
-            } else {
-                balance = 0;
-            }
-        }
-
-        return balance;
-    }
-
     /**
      * @dev Override required by Solidity for multiple inheritance
      */

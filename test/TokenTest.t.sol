@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.22;
+pragma solidity ^0.8.24;
 
 import {console} from "forge-std/Test.sol";
 import {SmartnodesERC20} from "../src/SmartnodesERC20.sol";
@@ -306,9 +306,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         // Fast forward one year
         vm.warp(block.timestamp + REWARD_PERIOD);
 
-        uint256 expectedRate = (INITIAL_EMISSION_RATE *
-            DEPLOYMENT_MULTIPLIER *
-            3) / 5;
+        uint256 expectedRate = (INITIAL_EMISSION_RATE * 3) / 5;
         assertEq(token.getEmissionRate(), expectedRate);
     }
 
@@ -316,10 +314,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         // Fast forward two years
         vm.warp(block.timestamp + (REWARD_PERIOD * 2));
 
-        uint256 expectedRate = (INITIAL_EMISSION_RATE *
-            DEPLOYMENT_MULTIPLIER *
-            3 *
-            3) / (5 * 5);
+        uint256 expectedRate = (INITIAL_EMISSION_RATE * 3 * 3) / (5 * 5);
         assertEq(token.getEmissionRate(), expectedRate);
     }
 
@@ -327,10 +322,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         // Fast forward many years to reach tail emission
         vm.warp(block.timestamp + (REWARD_PERIOD * 20));
 
-        assertEq(
-            token.getEmissionRate(),
-            TAIL_EMISSION * DEPLOYMENT_MULTIPLIER
-        );
+        assertEq(token.getEmissionRate(), TAIL_EMISSION);
     }
 
     // ============= Access Control Tests =============
@@ -361,7 +353,9 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         uint256 totalCapacity
     ) internal returns (uint256 distributionId, bytes32 merkleRoot) {
         // Generate merkle tree
-        bytes32[] memory leaves = _generateLeaves(participants);
+        distributionId = token.s_currentDistributionId() + 1;
+
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
         merkleRoot = _buildMerkleTree(leaves);
 
         console.log("Generated", leaves.length, "leaves");
@@ -394,22 +388,18 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         );
 
         distributionId = token.s_currentDistributionId();
-        assertEq(distributionId, 1, "Distribution ID should be 1");
 
         // Validate distribution storage
         (
             bytes32 storedRoot,
             SmartnodesERC20.PaymentAmounts memory workerReward,
             uint256 storedCapacity,
-            bool active,
-            uint256 timestamp
+            uint256 timestamp,
+            uint256 _distributionId
         ) = token.s_distributions(distributionId);
 
         assertEq(storedRoot, merkleRoot, "Stored merkle root mismatch");
         assertEq(storedCapacity, totalCapacity, "Stored capacity mismatch");
-        if (participants.length > 0)
-            assertTrue(active, "Distribution should be active");
-
         console.log("Distribution created and validated successfully");
     }
 
@@ -421,9 +411,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         (, SmartnodesERC20.PaymentAmounts memory workerReward, , , ) = token
             .s_distributions(distributionId);
 
-        uint256 totalSnoReward = INITIAL_EMISSION_RATE *
-            DEPLOYMENT_MULTIPLIER +
-            ADDITIONAL_SNO_PAYMENT;
+        uint256 totalSnoReward = INITIAL_EMISSION_RATE + ADDITIONAL_SNO_PAYMENT;
         uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
 
         uint256 expectedValidatorSno = (totalSnoReward *
@@ -467,12 +455,10 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         Participant[] memory participants
     ) internal {
         uint256 numWorkers = participants.length;
-        bytes32[] memory leaves = _generateLeaves(participants);
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
 
         // Calculate total rewards
-        uint256 totalSnoReward = INITIAL_EMISSION_RATE *
-            DEPLOYMENT_MULTIPLIER +
-            ADDITIONAL_SNO_PAYMENT;
+        uint256 totalSnoReward = INITIAL_EMISSION_RATE + ADDITIONAL_SNO_PAYMENT;
         uint256 totalEthReward = ADDITIONAL_ETH_PAYMENT;
 
         uint256 expectedValidatorSno = (totalSnoReward *
@@ -563,7 +549,7 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         Participant memory worker = participants[workerIndex];
 
         // Generate Merkle proof just for this worker
-        bytes32[] memory leaves = _generateLeaves(participants);
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
         bytes32[] memory proof = _generateMerkleProof(leaves, workerIndex);
 
         // Pre-claim balances
@@ -573,16 +559,13 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         vm.prank(worker.addr);
         token.claimMerkleRewards(distributionId, worker.capacity, proof);
 
-        uint256 validatorSnoReward = ((INITIAL_EMISSION_RATE *
-            DEPLOYMENT_MULTIPLIER +
+        uint256 validatorSnoReward = ((INITIAL_EMISSION_RATE +
             ADDITIONAL_SNO_PAYMENT) * VALIDATOR_REWARD_PERCENTAGE) / 100;
 
-        uint256 daoSnoReward = ((INITIAL_EMISSION_RATE *
-            DEPLOYMENT_MULTIPLIER +
+        uint256 daoSnoReward = ((INITIAL_EMISSION_RATE +
             ADDITIONAL_SNO_PAYMENT) * DAO_REWARD_PERCENTAGE) / 100;
 
-        uint256 expectedWorkerSno = (INITIAL_EMISSION_RATE *
-            DEPLOYMENT_MULTIPLIER +
+        uint256 expectedWorkerSno = (INITIAL_EMISSION_RATE +
             ADDITIONAL_SNO_PAYMENT) -
             validatorSnoReward -
             daoSnoReward;
@@ -602,5 +585,412 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         );
 
         console.log("Specific worker claim test passed!");
+    }
+
+    /**
+     * @notice Test creating multiple distributions in a loop and claiming rewards
+     */
+    function testMultipleMerkleDistributions() public {
+        _setupContractFunding();
+        vm.deal(address(core), ADDITIONAL_ETH_PAYMENT * 350);
+        vm.prank(address(core));
+        (bool success, ) = address(token).call{
+            value: ADDITIONAL_ETH_PAYMENT * 350
+        }("");
+        require(success, "Multi-distribution funding failed");
+
+        uint256 numDistributions = 100;
+        Participant[][] memory allParticipants = new Participant[][](
+            numDistributions
+        );
+        uint256[] memory distributionIds = new uint256[](numDistributions);
+
+        // Create multiple distributions
+        for (uint256 i = 0; i < numDistributions; i++) {
+            (
+                Participant[] memory participants,
+                uint256 totalCapacity
+            ) = _setupTestParticipants(5, false);
+            vm.warp(block.timestamp + UPDATE_TIME);
+            (uint256 distributionId, ) = _createAndValidateDistribution(
+                participants,
+                totalCapacity
+            );
+            distributionIds[i] = distributionId;
+            allParticipants[i] = participants;
+        }
+
+        // Prepare batch claim arrays
+        uint256[] memory capacities = new uint256[](numDistributions);
+        bytes32[][] memory proofs = new bytes32[][](numDistributions);
+
+        for (uint256 i = 0; i < numDistributions; i++) {
+            Participant memory worker = allParticipants[i][0]; // pick first worker for simplicity
+            capacities[i] = worker.capacity;
+
+            bytes32[] memory leaves = _generateLeaves(
+                allParticipants[i],
+                distributionIds[i]
+            );
+            proofs[i] = _generateMerkleProof(leaves, 0);
+        }
+
+        // Perform batch claim
+        vm.prank(allParticipants[0][0].addr);
+        token.batchClaimMerkleRewards(distributionIds, capacities, proofs);
+
+        // Verify claims
+        for (uint256 i = 0; i < numDistributions; i++) {
+            Participant memory worker = allParticipants[i][0];
+            assertTrue(
+                token.s_claimed(distributionIds[i], worker.addr),
+                "Worker claim not recorded"
+            );
+        }
+
+        console.log("Batch claim test passed!");
+    }
+
+    // ============= Additional Edge Case Tests =============
+
+    function testLockTokensWithExactBalance() public {
+        // Test locking when user has exactly the required amount
+        vm.prank(validator1);
+        token.transfer(worker1, USER_LOCK_AMOUNT);
+
+        vm.prank(address(core));
+        token.lockTokens(worker1, false);
+
+        assertEq(token.balanceOf(worker1), 0);
+    }
+
+    function testLockTokensJustUnderRequiredAmount() public {
+        // Test with 1 wei less than required
+        vm.prank(validator1);
+        token.transfer(worker1, USER_LOCK_AMOUNT - 1);
+
+        vm.expectRevert(SmartnodesERC20.Token__InsufficientBalance.selector);
+        vm.prank(address(core));
+        token.lockTokens(worker1, false);
+    }
+
+    // ============= Token Unlocking Edge Cases =============
+
+    function testUnlockAtExactTimeBoundary() public {
+        vm.prank(address(core));
+        token.unlockTokens(validator1);
+
+        // Fast forward to exactly the unlock time
+        vm.warp(block.timestamp + UNLOCK_PERIOD - 1);
+
+        // Should still revert as we need > unlock period
+        vm.expectRevert(SmartnodesERC20.Token__UnlockPending.selector);
+        vm.prank(address(core));
+        token.unlockTokens(validator1);
+    }
+
+    function testUnlockOneSecondAfterBoundary() public {
+        vm.prank(address(core));
+        token.unlockTokens(validator1);
+
+        vm.warp(block.timestamp + UNLOCK_PERIOD + 1);
+
+        // Should succeed now
+        vm.prank(address(core));
+        token.unlockTokens(validator1);
+    }
+
+    function testMultipleUnlockInitiations() public {
+        vm.startPrank(address(core));
+        token.unlockTokens(validator1);
+
+        // Try to initiate unlock again - should revert
+        vm.expectRevert(SmartnodesERC20.Token__UnlockPending.selector);
+        token.unlockTokens(validator1);
+        vm.stopPrank();
+    }
+
+    // ============= Escrow Edge Cases =============
+
+    function testEscrowZeroAmount() public {
+        vm.expectRevert(); // Should revert on zero amount
+        vm.prank(address(core));
+        token.escrowPayment(user1, 0);
+    }
+
+    function testEscrowMoreThanBalance() public {
+        uint256 userBalance = token.balanceOf(user1);
+
+        vm.expectRevert(SmartnodesERC20.Token__InsufficientBalance.selector);
+        vm.prank(address(core));
+        token.escrowPayment(user1, userBalance + 1);
+    }
+
+    function testEscrowExactBalance() public {
+        uint256 amount = 1000e18;
+        vm.prank(validator1);
+        token.transfer(worker1, amount);
+
+        vm.prank(address(core));
+        token.escrowPayment(worker1, amount);
+
+        assertEq(token.balanceOf(worker1), 0);
+    }
+
+    function testMultipleEscrowsSameUser() public {
+        uint256 amount1 = 500e18;
+        uint256 amount2 = 300e18;
+
+        vm.prank(validator1);
+        token.transfer(worker1, amount1 + amount2);
+
+        vm.startPrank(address(core));
+        token.escrowPayment(worker1, amount1);
+        token.escrowPayment(worker1, amount2);
+        vm.stopPrank();
+
+        SmartnodesERC20.PaymentAmounts memory escrowed = token
+            .getEscrowedPayments(worker1);
+        assertEq(escrowed.sno, amount1 + amount2);
+    }
+
+    function testEscrowEthWithWrongValue() public {
+        uint256 paymentAmount = 1 ether;
+        vm.deal(address(core), paymentAmount * 2);
+
+        // Send less ETH than specified in parameter
+        vm.prank(address(core));
+        vm.expectRevert();
+        token.escrowEthPayment{value: paymentAmount / 2}(user1, paymentAmount);
+    }
+
+    function testReleaseMoreThanEscrowed() public {
+        uint256 escrowAmount = 500e18;
+        uint256 releaseAmount = 600e18;
+
+        // Setup escrow
+        vm.prank(validator1);
+        token.transfer(user1, escrowAmount);
+        vm.prank(address(core));
+        token.escrowPayment(user1, escrowAmount);
+
+        // Try to release more than escrowed
+        vm.expectRevert();
+        vm.prank(address(core));
+        token.releaseEscrowedPayment(user1, releaseAmount);
+    }
+
+    // ============= Merkle Distribution Edge Cases =============
+
+    function testCreateDistributionWithZeroCapacity() public {
+        _setupContractFunding();
+
+        address[] memory validators = new address[](1);
+        validators[0] = validator1;
+
+        SmartnodesERC20.PaymentAmounts memory payments = SmartnodesERC20
+            .PaymentAmounts({sno: 0, eth: 0});
+
+        vm.prank(address(core));
+        token.createMerkleDistribution(
+            bytes32(0),
+            0,
+            validators,
+            payments,
+            validator1
+        );
+    }
+
+    function testCreateDistributionWithEmptyValidators() public {
+        _setupContractFunding();
+
+        address[] memory validators = new address[](0);
+
+        SmartnodesERC20.PaymentAmounts memory payments = SmartnodesERC20
+            .PaymentAmounts({
+                sno: uint128(ADDITIONAL_SNO_PAYMENT),
+                eth: uint128(ADDITIONAL_ETH_PAYMENT)
+            });
+
+        vm.expectRevert(); // Should revert with empty validators array
+        vm.prank(address(core));
+        token.createMerkleDistribution(
+            bytes32(0),
+            1000,
+            validators,
+            payments,
+            validator1
+        );
+    }
+
+    function testClaimWithInvalidProof() public {
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(3, false);
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
+        );
+
+        // Generate invalid proof (empty proof)
+        bytes32[] memory invalidProof = new bytes32[](0);
+
+        vm.expectRevert();
+        vm.prank(participants[0].addr);
+        token.claimMerkleRewards(
+            distributionId,
+            participants[0].capacity,
+            invalidProof
+        );
+    }
+
+    function testClaimWithWrongCapacity() public {
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(3, false);
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
+        );
+
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
+        bytes32[] memory proof = _generateMerkleProof(leaves, 0);
+
+        // Use wrong capacity
+        vm.expectRevert();
+        vm.prank(participants[0].addr);
+        token.claimMerkleRewards(
+            distributionId,
+            participants[0].capacity + 1,
+            proof
+        );
+    }
+
+    function testDoubleClaimSameDistribution() public {
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(1, false);
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
+        );
+
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
+        bytes32[] memory proof = _generateMerkleProof(leaves, 0);
+
+        // First claim should succeed
+        vm.prank(participants[0].addr);
+        token.claimMerkleRewards(
+            distributionId,
+            participants[0].capacity,
+            proof
+        );
+
+        // Second claim should revert
+        vm.expectRevert(SmartnodesERC20.Token__RewardsAlreadyClaimed.selector);
+        vm.prank(participants[0].addr);
+        token.claimMerkleRewards(
+            distributionId,
+            participants[0].capacity,
+            proof
+        );
+    }
+
+    function testClaimFromNonexistentDistribution() public {
+        bytes32[] memory proof = new bytes32[](1);
+        proof[0] = bytes32(0);
+
+        vm.expectRevert();
+        vm.prank(user1);
+        token.claimMerkleRewards(999, 1000, proof);
+    }
+
+    // ============= Batch Operations Edge Cases =============
+
+    function testBatchClaimWithMismatchedArrays() public {
+        uint256[] memory distributionIds = new uint256[](2);
+        uint256[] memory capacities = new uint256[](1); // Different length
+        bytes32[][] memory proofs = new bytes32[][](2);
+
+        vm.expectRevert();
+        vm.prank(user1);
+        token.batchClaimMerkleRewards(distributionIds, capacities, proofs);
+    }
+
+    // ============= Emission Rate Edge Cases =============
+
+    function testEmissionRateAtExactYearBoundaries() public {
+        uint256 start = token.i_deploymentTimestamp();
+
+        uint256 rateAtBeginning = token.getEmissionRate();
+
+        vm.warp(start + REWARD_PERIOD - 1);
+        uint256 rateAtOneYearEnd = token.getEmissionRate();
+        assertEq(rateAtOneYearEnd, rateAtBeginning); // still era 0
+
+        vm.warp(start + REWARD_PERIOD);
+        uint256 rateAtOneYear = token.getEmissionRate(); // era 1
+
+        vm.warp(start + 2 * REWARD_PERIOD - 1);
+        uint256 rateJustBeforeTwoYears = token.getEmissionRate();
+        assertEq(rateAtOneYear, rateJustBeforeTwoYears); // still era 1
+
+        vm.warp(start + 2 * REWARD_PERIOD);
+        uint256 rateAtTwoYears = token.getEmissionRate(); // era 2
+        assertTrue(rateAtTwoYears < rateAtOneYear);
+    }
+
+    function testEmissionRateNearTailEmission() public {
+        // Calculate when we reach tail emission
+        uint256 rate = INITIAL_EMISSION_RATE;
+        uint256 _years = 0;
+
+        while (rate > TAIL_EMISSION) {
+            rate = (rate * 3) / 5;
+            _years++;
+        }
+
+        // Go to just before tail emission threshold
+        vm.warp(block.timestamp + (REWARD_PERIOD * (_years - 1)));
+        assertTrue(token.getEmissionRate() > TAIL_EMISSION);
+
+        // Go to tail emission threshold
+        vm.warp(block.timestamp + REWARD_PERIOD);
+        assertEq(token.getEmissionRate(), TAIL_EMISSION);
+    }
+
+    // ============= Gas Optimization Tests =============
+
+    function testGasUsageForLargeDistribution() public {
+        _setupContractFunding();
+        (
+            Participant[] memory participants,
+            uint256 totalCapacity
+        ) = _setupTestParticipants(1000, false);
+
+        uint256 gasStart = gasleft();
+        (uint256 distributionId, ) = _createAndValidateDistribution(
+            participants,
+            totalCapacity
+        );
+        uint256 gasUsed = gasStart - gasleft();
+
+        console.log("Gas used for 1000 participant distribution:", gasUsed);
+        // You can add assertions here based on your gas requirements
+    }
+
+    function testOverflowProtection() public {
+        // Test with very large numbers near uint256 max
+        uint256 largeAmount = type(uint256).max;
+
+        vm.expectRevert(); // Should revert due to overflow/insufficient balance
+        vm.prank(address(core));
+        token.escrowPayment(user1, largeAmount);
     }
 }
