@@ -9,8 +9,8 @@ import {SmartnodesDAO} from "../src/SmartnodesDAO.sol";
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
 // DAO Configuration
-uint256 constant TIMELOCK_DELAY = 2 days; // Matching your original TIMELOCK_DELAY
-uint128 constant BASE_UPDATE_TIME = uint128(128 hours);
+uint256 constant TIMELOCK_DELAY = 2 days;
+uint128 constant BASE_UPDATE_TIME = uint128(8 hours);
 uint8 constant PROPOSAL_THRESHOLD_PERCENTAGE = 66;
 
 contract Deploy is Script {
