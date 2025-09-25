@@ -59,10 +59,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
     mapping(address => uint256) public validatorVote;
     mapping(address => uint8) public hasSubmittedProposal;
     mapping(address => uint256) public validatorLastActiveRound; // Track validator activity
-
-    // Enhanced round management
-    uint256 public currentRoundNumber;
-    uint256 private roundSeed; // Used for deterministic but unpredictable validator selection
+    uint256 private roundSeed;
 
     // ============= Events ==============
     event ProposalCreated(
@@ -150,7 +147,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         }
 
         // Initialize round management
-        currentRoundNumber = 1;
         roundSeed = uint256(
             keccak256(
                 abi.encode(block.timestamp, block.prevrandao, _genesisNodes)
@@ -206,7 +202,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         // mark as active
         hasSubmittedProposal[sender] = proposalNum;
-        validatorLastActiveRound[sender] = currentRoundNumber;
+        validatorLastActiveRound[sender] = nextProposalId;
 
         emit ProposalCreated(proposalNum, proposalHash, sender);
     }
@@ -228,7 +224,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         Proposal storage proposal = currentProposals[proposalId - 1];
         validatorVote[msg.sender] = proposalId;
-        validatorLastActiveRound[msg.sender] = currentRoundNumber; // Mark as active
+        validatorLastActiveRound[msg.sender] = nextProposalId; // Mark as active
         proposal.votes++;
     }
 
@@ -281,7 +277,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         }
 
         // Mark executor as active
-        validatorLastActiveRound[msg.sender] = currentRoundNumber;
+        validatorLastActiveRound[msg.sender] = nextProposalId;
 
         // Optimized batch validator removal
         if (validatorsToRemove.length > 0) {
@@ -341,7 +337,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         validators.push(validator);
         isValidator[validator] = true;
-        validatorLastActiveRound[validator] = currentRoundNumber; // Mark as active from start
+        validatorLastActiveRound[validator] = nextProposalId; // Mark as active from start
         emit ValidatorAdded(validator);
     }
 
@@ -438,7 +434,6 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     function _updateRound() internal {
         _resetValidatorStates();
-        currentRoundNumber++;
         _selectNewRoundValidators();
         delete currentProposals; // Clear proposals for new round
         timeConfig.lastExecutionTime = uint128(block.timestamp);
@@ -492,7 +487,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
                     roundSeed,
                     block.timestamp,
                     block.prevrandao,
-                    currentRoundNumber,
+                    nextProposalId,
                     blockhash(block.number - 1)
                 )
             )
@@ -511,8 +506,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
         // Prioritize active validators (those who participated in recent rounds)
         uint256 selectedCount = 0;
-        uint256 inactivityThreshold = currentRoundNumber > 3
-            ? currentRoundNumber - 3
+        uint256 inactivityThreshold = nextProposalId > 3
+            ? nextProposalId - 3
             : 0;
 
         // First, try to select active validators
@@ -552,7 +547,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
             }
         }
 
-        emit NewRoundStarted(currentRoundNumber, currentRoundValidators);
+        emit NewRoundStarted(nextProposalId, currentRoundValidators);
     }
 
     function _computeProposalHash(
@@ -628,7 +623,8 @@ contract SmartnodesCoordinator is ReentrancyGuard {
 
     function _isCurrentRoundExpired() internal view returns (bool) {
         TimeConfig memory tc = timeConfig;
-        return block.timestamp > tc.lastExecutionTime + (tc.updateTime << 1);
+        return
+            block.timestamp > tc.lastExecutionTime + ((tc.updateTime * 5) / 4);
     }
 
     // ============= View Functions =============
@@ -726,7 +722,7 @@ contract SmartnodesCoordinator is ReentrancyGuard {
         )
     {
         return (
-            currentRoundNumber,
+            nextProposalId,
             currentRoundValidators.length,
             _calculateRoundValidatorCount(),
             _calculateRequiredVotes()

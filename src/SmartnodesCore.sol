@@ -19,6 +19,7 @@ contract SmartnodesCore {
     error Core__NotValidatorMultisig();
     error Core__NotToken();
     error Core__NodeExists();
+    error Core__NodeDoesNotExist();
 
     // ============= Events ==============
     enum JobState {
@@ -125,6 +126,29 @@ contract SmartnodesCore {
 
         // Lock tokens for the user
         i_tokenContract.lockTokens(userAddress, false);
+    }
+
+    function unlockValidator() external {
+        address nodeAddress = msg.sender;
+        Node storage validator = validators[nodeAddress];
+
+        if (!validator.exists || !validator.locked)
+            revert Core__NodeDoesNotExist();
+
+        validator.locked = false;
+
+        i_tokenContract.unlockTokens(nodeAddress, true);
+    }
+
+    function unlockUser() external {
+        address nodeAddress = msg.sender;
+        Node storage user = users[nodeAddress];
+
+        if (!user.exists || !user.locked) revert Core__NodeDoesNotExist();
+
+        user.locked = false;
+
+        i_tokenContract.unlockTokens(nodeAddress, true);
     }
 
     /**

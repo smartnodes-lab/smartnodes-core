@@ -31,7 +31,8 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             Participant[] memory participants,
             uint256 totalCapacity
         ) = _setupTestParticipants(numWorkers, false);
-        bytes32[] memory leaves = _generateLeaves(participants);
+        uint256 distributionId = token.s_currentDistributionId();
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
         bytes32 merkleRoot = _buildMerkleTree(leaves);
 
         bytes32[] memory jobHashes = new bytes32[](1);
@@ -92,18 +93,12 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             bytes32 storedRoot,
             SmartnodesERC20.PaymentAmounts memory workerReward,
             uint256 storedCapacity,
-            bool active,
-            uint256 timestamp
+            uint256 timestamp,
+            uint256 _distributionId
         ) = token.s_distributions(newDistributionId);
 
         assertEq(storedRoot, merkleRoot, "Stored merkle root should match");
         assertEq(storedCapacity, totalCapacity, "Stored capacity should match");
-        if (numWorkers == 0) {
-            assertFalse(active, "Empty distribution should not be active");
-        } else {
-            assertTrue(active, "Distribution should be active");
-        }
-
         console.log("Merkle distribution created successfully");
         console.log("Distribution ID:", newDistributionId);
         console.log("Worker reward SNO:", workerReward.sno / 1e18);
@@ -127,7 +122,8 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             Participant[] memory participants,
             uint256 totalCapacity
         ) = _setupTestParticipants(100, false);
-        bytes32[] memory leaves = _generateLeaves(participants);
+        uint256 distributionId = token.s_currentDistributionId();
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
         bytes32 merkleRoot = _buildMerkleTree(leaves);
 
         bytes32[] memory jobHashes = new bytes32[](1);
@@ -194,8 +190,8 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             bytes32 storedRoot,
             SmartnodesERC20.PaymentAmounts memory workerReward,
             uint256 storedCapacity,
-            bool active,
-            uint256 timestamp
+            uint256 timestamp,
+            uint256 _distributionId
         ) = token.s_distributions(newDistributionId);
 
         assertEq(storedRoot, merkleRoot, "Stored merkle root should match");
@@ -216,7 +212,8 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             uint256 totalCapacity
         ) = _setupTestParticipants(numWorkers, false);
 
-        bytes32[] memory leaves = _generateLeaves(participants);
+        uint256 distributionId = token.s_currentDistributionId();
+        bytes32[] memory leaves = _generateLeaves(participants, distributionId);
         bytes32 merkleRoot = _buildMerkleTree(leaves);
 
         bytes32[] memory jobHashes = new bytes32[](1);
@@ -265,7 +262,10 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
             Participant[] memory participants,
             uint256 totalCapacity
         ) = _setupTestParticipants(numWorkers, false);
-        bytes32 merkleRoot = _buildMerkleTree(_generateLeaves(participants));
+        uint256 distributionId = token.s_currentDistributionId();
+        bytes32 merkleRoot = _buildMerkleTree(
+            _generateLeaves(participants, distributionId)
+        );
 
         bytes32[] memory jobHashes = new bytes32[](1);
         jobHashes[0] = JOB_ID_1;
@@ -300,5 +300,92 @@ contract SmartnodesCoordinatorTest is BaseSmartnodesTest {
         assertEq(proposal.votes, 1);
 
         console.log("Voting successful. Total votes:", proposal.votes);
+    }
+
+    function testExecuteProposal200Rounds() public {
+        // Add more validators so proposals can consistently pass voting
+        vm.prank(validator2);
+        core.createValidator(VALIDATOR2_PUBKEY);
+        vm.prank(validator2);
+        coordinator.addValidator();
+        vm.prank(validator3);
+        core.createValidator(VALIDATOR3_PUBKEY);
+        vm.prank(validator3);
+        coordinator.addValidator();
+
+        (uint128 updateTime, ) = coordinator.timeConfig();
+        vm.warp(block.timestamp + updateTime);
+
+        for (uint256 i = 0; i < 200; i++) {
+            vm.warp(block.timestamp + updateTime);
+
+            (
+                Participant[] memory participants,
+                uint256 totalCapacity
+            ) = _setupTestParticipants(100, false);
+            uint256 distributionId = token.s_currentDistributionId();
+            bytes32[] memory leaves = _generateLeaves(
+                participants,
+                distributionId
+            );
+            bytes32 merkleRoot = _buildMerkleTree(leaves);
+
+            bytes32[] memory jobHashes = new bytes32[](1);
+            jobHashes[0] = JOB_ID_1;
+
+            address[] memory workers = new address[](100);
+            uint256[] memory capacities = new uint256[](100);
+            for (uint256 i = 0; i < 100; i++) {
+                workers[i] = address(uint160(0x3000 + i));
+                capacities[i] = 10e18 + (i * 5e18);
+            }
+
+            bytes32 workersHash = keccak256(abi.encode(workers));
+            bytes32 capacitiesHash = keccak256(abi.encode(capacities));
+
+            address[] memory validatorsToRemove = new address[](0);
+
+            bytes32 proposalHash = keccak256(
+                abi.encode(
+                    merkleRoot,
+                    validatorsToRemove,
+                    jobHashes,
+                    workersHash,
+                    capacitiesHash
+                )
+            );
+
+            address proposer;
+            try coordinator.currentRoundValidators(0) returns (address v) {
+                proposer = v;
+            } catch {
+                proposer = validator1;
+            }
+
+            vm.prank(proposer);
+            coordinator.createProposal(proposalHash);
+
+            uint8 proposalId = coordinator.getNumProposals();
+
+            vm.prank(validator1);
+            coordinator.voteForProposal(proposalId);
+
+            vm.prank(validator2);
+            coordinator.voteForProposal(proposalId);
+
+            vm.prank(validator3);
+            coordinator.voteForProposal(proposalId);
+
+            vm.prank(proposer);
+            coordinator.executeProposal(
+                proposalId,
+                merkleRoot,
+                totalCapacity,
+                validatorsToRemove,
+                jobHashes,
+                workersHash,
+                capacitiesHash
+            );
+        }
     }
 }
