@@ -10,7 +10,7 @@ import {TimelockController} from "@openzeppelin/contracts/governance/TimelockCon
 
 // DAO Configuration
 uint256 constant TIMELOCK_DELAY = 2 days;
-uint128 constant BASE_UPDATE_TIME = uint128(8 hours);
+uint128 constant BASE_UPDATE_TIME = uint128(24 hours);
 uint8 constant PROPOSAL_THRESHOLD_PERCENTAGE = 66;
 
 contract Deploy is Script {
@@ -20,6 +20,7 @@ contract Deploy is Script {
     function run() external {
         genesis.push(msg.sender);
         genesis.push(0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266);
+        genesis.push(0x25Fde2567cbC578e7739faD0499eD7d5056572Dd);
         address[] memory proposers = new address[](0);
         address[] memory executors = new address[](0);
 

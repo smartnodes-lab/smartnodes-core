@@ -993,4 +993,94 @@ contract SmartnodesTokenTest is BaseSmartnodesTest {
         vm.prank(address(core));
         token.escrowPayment(user1, largeAmount);
     }
+
+    /**
+     * @notice Simulate 100 reward distribution periods and claim all 100 rewards
+     */
+    function testSimulate100RewardPeriodsAndClaim() public {
+        console.log(
+            "=== Simulating 100 reward periods and claiming in batches of 100 ==="
+        );
+
+        uint256 NUM_PERIODS = 100;
+        uint256 BATCH_SIZE = 100;
+        _setupContractFunding();
+
+        // fund contract for ETH side of rewards
+        vm.deal(address(core), ADDITIONAL_ETH_PAYMENT * NUM_PERIODS);
+        vm.prank(address(core));
+        (bool sent, ) = address(token).call{
+            value: ADDITIONAL_ETH_PAYMENT * NUM_PERIODS
+        }("");
+        require(sent, "funding failed");
+
+        // pick one worker to repeatedly claim rewards
+        Participant[] memory initialWorkers;
+        uint256 dummyTotalCapacity;
+        (initialWorkers, dummyTotalCapacity) = _setupTestParticipants(5, false);
+
+        address worker = initialWorkers[0].addr;
+        uint256 workerIndex = 0;
+
+        uint256[] memory distributionIds = new uint256[](NUM_PERIODS);
+        uint256[] memory capacities = new uint256[](NUM_PERIODS);
+        bytes32[][] memory proofs = new bytes32[][](NUM_PERIODS);
+
+        // ----- CREATE 10,000 MERKLE DISTRIBUTIONS -----
+        for (uint256 i = 0; i < NUM_PERIODS; i++) {
+            Participant[] memory participants;
+            uint256 totalCapacity;
+
+            (participants, totalCapacity) = _setupTestParticipants(5, false);
+
+            require(workerIndex < participants.length, "invalid worker index");
+            capacities[i] = participants[workerIndex].capacity;
+
+            bytes32[] memory leaves = _generateLeaves(
+                participants,
+                token.s_currentDistributionId() + 1
+            );
+            proofs[i] = _generateMerkleProof(leaves, workerIndex);
+
+            vm.warp(block.timestamp + UPDATE_TIME);
+
+            (uint256 distributionId, ) = _createAndValidateDistribution(
+                participants,
+                totalCapacity
+            );
+
+            distributionIds[i] = distributionId;
+        }
+
+        uint256 preBal = token.balanceOf(worker);
+        uint256 preEth = worker.balance;
+
+        // ----- CLAIM IN BATCHES OF 100 -----
+        vm.startPrank(worker);
+
+        for (uint256 i = 0; i < NUM_PERIODS; i += BATCH_SIZE) {
+            uint256 end = i + BATCH_SIZE;
+            if (end > NUM_PERIODS) end = NUM_PERIODS;
+
+            for (uint256 j = i; j < end; j++) {
+                token.claimMerkleRewards(
+                    distributionIds[j],
+                    capacities[j],
+                    proofs[j]
+                );
+            }
+        }
+
+        vm.stopPrank();
+
+        uint256 postBal = token.balanceOf(worker);
+        uint256 postEth = worker.balance;
+
+        assertTrue(postBal > preBal, "worker SNO rewards should increase");
+        assertTrue(postEth > preEth, "worker ETH rewards should increase");
+
+        console.log(
+            "Successfully created and claimed 10,000 reward periods in batches of 100!"
+        );
+    }
 }

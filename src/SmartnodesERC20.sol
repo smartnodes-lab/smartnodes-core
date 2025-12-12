@@ -206,7 +206,7 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         // Mint initial tokens to genesis nodes
         uint256 gensisNodesLength = _genesisNodes.length;
         for (uint256 i = 0; i < gensisNodesLength; i++) {
-            _mint(_genesisNodes[i], (s_validatorLockAmount * 3));
+            _mint(_genesisNodes[i], (s_validatorLockAmount) * 2);
         }
     }
 
@@ -1005,9 +1005,13 @@ contract SmartnodesERC20 is ERC20, ERC20Permit, ERC20Votes, ReentrancyGuard {
         uint256 total = totalSupply();
         uint256 reward = getEmissionRate();
 
+        // Circulating = minted tokens minus locked and escrowed
+        // (unclaimed rewards aren't minted yet, so they don't reduce circulation)
+        uint256 circulating = total - s_totalLocked - s_totalEscrowed.sno;
+
         return (
             total,
-            total - s_totalLocked - s_totalUnclaimed.sno - s_totalEscrowed.sno,
+            circulating,
             s_totalLocked,
             s_totalUnclaimed.sno,
             s_totalEscrowed.sno,
